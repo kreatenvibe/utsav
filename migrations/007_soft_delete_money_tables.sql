@@ -1,0 +1,3 @@
+ALTER TABLE donations ADD COLUMN deleted_at TIMESTAMPTZ;
+ALTER TABLE expenses ADD COLUMN deleted_at TIMESTAMPTZ;
+ALTER TABLE expense_payments ADD COLUMN deleted_at TIMESTAMPTZ;
