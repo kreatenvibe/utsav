@@ -1,0 +1,937 @@
+{
+  "info": {
+    "name": "Festival Management API",
+    "description": "Backend API for the community festival management app (donations, expenses, tasks, volunteers, multi-colony support). All GET routes are public; every POST/PUT/PATCH/DELETE route requires a JWT via `Authorization: Bearer {{token}}` (see the Auth folder to obtain one).\n\nSet the `baseUrl` and `token` collection variables before running requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "f3f1a6b0-6b1a-4b1a-9c1a-festivalmgmtapi"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "colonyId", "value": "1", "type": "string" },
+    { "key": "festivalId", "value": "1", "type": "string" },
+    { "key": "memberId", "value": "1", "type": "string" },
+    { "key": "donorId", "value": "1", "type": "string" },
+    { "key": "expectedDonationId", "value": "1", "type": "string" },
+    { "key": "donationId", "value": "1", "type": "string" },
+    { "key": "expenseId", "value": "1", "type": "string" },
+    { "key": "expensePaymentId", "value": "1", "type": "string" },
+    { "key": "taskId", "value": "1", "type": "string" },
+    { "key": "taskAssignmentId", "value": "1", "type": "string" },
+    { "key": "availabilityId", "value": "1", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Public endpoints — no Authorization header needed. Login here to get the JWT to put in the {{token}} variable for every other request.",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"priya.sharma@example.com\",\n  \"password\": \"SecurePass123!\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "register"]
+            },
+            "description": "Creates a new user. No auth required. There is no roles system yet — any registered user is effectively an \"organizer\" with full write access. Returns 201 with `{ user_id, email }` (password hash never included). Duplicate email returns 409."
+          }
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"priya.sharma@example.com\",\n  \"password\": \"SecurePass123!\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "No auth required. Returns `{ token }` — a JWT valid for 7 days. Copy the token into the collection-level `token` variable so all other requests pick it up automatically. Wrong password and unknown email both return 401 with the same message (login intentionally doesn't leak which emails are registered)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Colonies",
+      "description": "No DELETE endpoint exists for colonies yet — cascade behavior (what happens to festivals under a deleted colony) hasn't been decided, so deletion is deliberately deferred.",
+      "item": [
+        {
+          "name": "Create Colony",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Sunrise Colony\",\n  \"location\": \"Sector 12, Pune\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/colonies",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies"]
+            },
+            "description": "Requires organizer auth. Only `name` is required; `location` is optional."
+          }
+        },
+        {
+          "name": "List Colonies",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/colonies",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies"]
+            },
+            "description": "Public — no auth required. Returns all colonies ordered by colony_id."
+          }
+        },
+        {
+          "name": "Get Colony by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/colonies/{{colonyId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "{{colonyId}}"]
+            },
+            "description": "Public — no auth required. 404 if the colony doesn't exist."
+          }
+        },
+        {
+          "name": "Update Colony",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Sunrise Colony Phase 2\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/colonies/{{colonyId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "{{colonyId}}"]
+            },
+            "description": "Requires organizer auth. Partial update — omit any field you don't want to change, it stays as-is (COALESCE semantics)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Festivals",
+      "description": "current_balance is always computed on read (SUM of matched donations minus SUM of expense_payments) — it is never stored or accepted on PATCH. No DELETE endpoint yet (deferred, same reason as colonies).",
+      "item": [
+        {
+          "name": "Create Festival",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"colony_id\": {{colonyId}},\n  \"name\": \"Ganesh Chaturthi\",\n  \"year\": 2026\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/festivals",
+              "host": ["{{baseUrl}}"],
+              "path": ["festivals"]
+            },
+            "description": "Requires organizer auth. `colony_id`, `name`, and `year` are all required; `colony_id` must reference an existing colony (400 if not)."
+          }
+        },
+        {
+          "name": "List Festivals",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/festivals?colony_id={{colonyId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["festivals"],
+              "query": [
+                { "key": "colony_id", "value": "{{colonyId}}", "description": "Optional filter" }
+              ]
+            },
+            "description": "Public — no auth required. Each row includes a computed `current_balance` field. Optional `colony_id` query param filters to one colony."
+          }
+        },
+        {
+          "name": "Get Festival by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/festivals/{{festivalId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["festivals", "{{festivalId}}"]
+            },
+            "description": "Public — no auth required. Includes computed `current_balance`. 404 if not found."
+          }
+        },
+        {
+          "name": "Update Festival",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Ganesh Chaturthi Mahotsav\",\n  \"year\": 2026\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/festivals/{{festivalId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["festivals", "{{festivalId}}"]
+            },
+            "description": "Requires organizer auth. Only `name` and `year` are updatable — `current_balance` is always derived and silently ignored if sent."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Members",
+      "description": "Volunteers/members of a colony. No DELETE endpoint yet (deferred).",
+      "item": [
+        {
+          "name": "Create Member",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Rohit Deshmukh\",\n  \"phone\": \"9876543210\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/members",
+              "host": ["{{baseUrl}}"],
+              "path": ["members"]
+            },
+            "description": "Requires organizer auth. Only `name` is required; `phone` is optional."
+          }
+        },
+        {
+          "name": "List Members",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/members",
+              "host": ["{{baseUrl}}"],
+              "path": ["members"]
+            },
+            "description": "Public — no auth required."
+          }
+        },
+        {
+          "name": "Get Member by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/members/{{memberId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["members", "{{memberId}}"]
+            },
+            "description": "Public — no auth required. 404 if not found."
+          }
+        },
+        {
+          "name": "Update Member",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"9876500000\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/members/{{memberId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["members", "{{memberId}}"]
+            },
+            "description": "Requires organizer auth. Partial update (send only what you want changed)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Donors",
+      "description": "People/entities who pledge or give donations. No DELETE endpoint yet (deferred).",
+      "item": [
+        {
+          "name": "Create Donor",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Anil Kumar Traders\",\n  \"phone\": \"9822011223\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/donors",
+              "host": ["{{baseUrl}}"],
+              "path": ["donors"]
+            },
+            "description": "Requires organizer auth. Only `name` is required; `phone` is optional."
+          }
+        },
+        {
+          "name": "List Donors",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/donors",
+              "host": ["{{baseUrl}}"],
+              "path": ["donors"]
+            },
+            "description": "Public — no auth required."
+          }
+        },
+        {
+          "name": "Get Donor by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/donors/{{donorId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["donors", "{{donorId}}"]
+            },
+            "description": "Public — no auth required. 404 if not found."
+          }
+        },
+        {
+          "name": "Update Donor",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"9822099999\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/donors/{{donorId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["donors", "{{donorId}}"]
+            },
+            "description": "Requires organizer auth. Partial update."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Expected Donations",
+      "description": "Pledges tied to a donor + festival. total_donated is computed by summing linked (non-deleted) donations, not stored. No DELETE endpoint yet (deferred).",
+      "item": [
+        {
+          "name": "Create Expected Donation",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"donor_id\": {{donorId}},\n  \"festival_id\": {{festivalId}},\n  \"expected_amount\": 5000,\n  \"year\": 2026,\n  \"purpose\": \"Ganesh Chaturthi sponsorship\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/expected-donations",
+              "host": ["{{baseUrl}}"],
+              "path": ["expected-donations"]
+            },
+            "description": "Requires organizer auth. `donor_id`, `festival_id`, `expected_amount`, and `year` are required; `purpose` is optional. `status` defaults to `open` and cannot be set on create."
+          }
+        },
+        {
+          "name": "List Expected Donations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/expected-donations?festival_id={{festivalId}}&donor_id={{donorId}}&status=open",
+              "host": ["{{baseUrl}}"],
+              "path": ["expected-donations"],
+              "query": [
+                { "key": "festival_id", "value": "{{festivalId}}", "description": "Optional filter" },
+                { "key": "donor_id", "value": "{{donorId}}", "description": "Optional filter" },
+                { "key": "status", "value": "open", "description": "Optional filter, 'open' or 'closed'" }
+              ]
+            },
+            "description": "Public — no auth required. Each row includes a computed `total_donated` field. All query params are optional filters."
+          }
+        },
+        {
+          "name": "Get Expected Donation by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/expected-donations/{{expectedDonationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expected-donations", "{{expectedDonationId}}"]
+            },
+            "description": "Public — no auth required. Includes computed `total_donated`. 404 if not found."
+          }
+        },
+        {
+          "name": "Update Expected Donation",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"expected_amount\": 6000,\n  \"status\": \"closed\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/expected-donations/{{expectedDonationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expected-donations", "{{expectedDonationId}}"]
+            },
+            "description": "Requires organizer auth. Partial update. `status`, if sent, must be exactly 'open' or 'closed' (400 otherwise) — it is set explicitly, never auto-derived from totals."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Donations",
+      "description": "Actual money received. Amounts are immutable once created (never edited) — only new rows are added, and delete is a SOFT delete (deleted_at) so history is preserved.",
+      "item": [
+        {
+          "name": "Create Donation",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"donor_id\": {{donorId}},\n  \"expected_id\": {{expectedDonationId}},\n  \"amount\": 5000,\n  \"date\": \"2026-08-20\",\n  \"collected_by\": {{memberId}}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/donations",
+              "host": ["{{baseUrl}}"],
+              "path": ["donations"]
+            },
+            "description": "Requires organizer auth. `donor_id`, `amount`, and `date` (YYYY-MM-DD) are required. `expected_id` is optional — omit it for a walk-in donation not tied to any pledge. `collected_by` (member id) is also optional."
+          }
+        },
+        {
+          "name": "List Donations",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/donations?donor_id={{donorId}}&expected_id={{expectedDonationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["donations"],
+              "query": [
+                { "key": "donor_id", "value": "{{donorId}}", "description": "Optional filter" },
+                { "key": "expected_id", "value": "{{expectedDonationId}}", "description": "Optional filter" }
+              ]
+            },
+            "description": "Public — no auth required. Excludes soft-deleted rows automatically."
+          }
+        },
+        {
+          "name": "Get Donation by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/donations/{{donationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["donations", "{{donationId}}"]
+            },
+            "description": "Public — no auth required. Returns 404 for a soft-deleted donation, same as if it never existed."
+          }
+        },
+        {
+          "name": "Delete Donation",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/donations/{{donationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["donations", "{{donationId}}"]
+            },
+            "description": "Requires organizer auth. This is a SOFT delete — sets `deleted_at`, the row and its `amount` are never actually removed or edited. Affects the linked expected_donation's `total_donated` and the festival's `current_balance` on next read. Returns 204 with no body."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Expenses",
+      "description": "Planned/actual spend against a festival. Delete is a SOFT delete (deleted_at), same rationale as Donations.",
+      "item": [
+        {
+          "name": "Create Expense",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"festival_id\": {{festivalId}},\n  \"purpose\": \"Stage and sound system rental\",\n  \"vendor_name\": \"Om Sound Services\",\n  \"amount_planned\": 15000\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/expenses",
+              "host": ["{{baseUrl}}"],
+              "path": ["expenses"]
+            },
+            "description": "Requires organizer auth. `festival_id` and `amount_planned` are required; `purpose` and `vendor_name` are optional. `status` defaults to `open`."
+          }
+        },
+        {
+          "name": "List Expenses",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/expenses?festival_id={{festivalId}}&status=open",
+              "host": ["{{baseUrl}}"],
+              "path": ["expenses"],
+              "query": [
+                { "key": "festival_id", "value": "{{festivalId}}", "description": "Optional filter" },
+                { "key": "status", "value": "open", "description": "Optional filter, 'open' or 'settled'" }
+              ]
+            },
+            "description": "Public — no auth required. Each row includes a computed `total_paid` field. Excludes soft-deleted expenses."
+          }
+        },
+        {
+          "name": "Get Expense by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/expenses/{{expenseId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expenses", "{{expenseId}}"]
+            },
+            "description": "Public — no auth required. Includes computed `total_paid`. 404 if not found or soft-deleted."
+          }
+        },
+        {
+          "name": "Update Expense",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount_planned\": 16000,\n  \"status\": \"settled\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/expenses/{{expenseId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expenses", "{{expenseId}}"]
+            },
+            "description": "Requires organizer auth. Partial update. `status`, if sent, must be exactly 'open' or 'settled' (400 otherwise)."
+          }
+        },
+        {
+          "name": "Delete Expense",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/expenses/{{expenseId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expenses", "{{expenseId}}"]
+            },
+            "description": "Requires organizer auth. SOFT delete (deleted_at) — disappears from list/get, feeds into festival `current_balance`. Existing expense_payments under it are NOT cascaded/blocked. Returns 204."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Expense Payments",
+      "description": "Actual money paid out against an expense. Delete is a SOFT delete — same immutable-money-fields rule as Donations.",
+      "item": [
+        {
+          "name": "Create Expense Payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"expense_id\": {{expenseId}},\n  \"amount\": 15000,\n  \"date\": \"2026-08-21\",\n  \"paid_by\": {{memberId}}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/expense-payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["expense-payments"]
+            },
+            "description": "Requires organizer auth. `expense_id`, `amount`, and `date` (YYYY-MM-DD) are required; `paid_by` (member id) is optional. Note: this is NOT blocked from being created against a soft-deleted expense (a known gap, not yet fixed)."
+          }
+        },
+        {
+          "name": "List Expense Payments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/expense-payments?expense_id={{expenseId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expense-payments"],
+              "query": [
+                { "key": "expense_id", "value": "{{expenseId}}", "description": "Optional filter" }
+              ]
+            },
+            "description": "Public — no auth required. Excludes soft-deleted rows."
+          }
+        },
+        {
+          "name": "Get Expense Payment by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/expense-payments/{{expensePaymentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expense-payments", "{{expensePaymentId}}"]
+            },
+            "description": "Public — no auth required. 404 if not found or soft-deleted."
+          }
+        },
+        {
+          "name": "Delete Expense Payment",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/expense-payments/{{expensePaymentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["expense-payments", "{{expensePaymentId}}"]
+            },
+            "description": "Requires organizer auth. SOFT delete — affects the parent expense's `total_paid` and the festival's `current_balance` on next read. Returns 204."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Tasks",
+      "description": "Work items for a festival. Delete here is a HARD delete (unlike money tables) — blocked with a 400 if task_assignments still reference the task.",
+      "item": [
+        {
+          "name": "Create Task",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"festival_id\": {{festivalId}},\n  \"title\": \"Set up decoration lights\",\n  \"planned_date\": \"2026-08-25\",\n  \"labor_required\": 4\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/tasks",
+              "host": ["{{baseUrl}}"],
+              "path": ["tasks"]
+            },
+            "description": "Requires organizer auth. `festival_id` and `title` are required; `planned_date` and `labor_required` are optional. `status` defaults to `planned`."
+          }
+        },
+        {
+          "name": "List Tasks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks?festival_id={{festivalId}}&status=planned",
+              "host": ["{{baseUrl}}"],
+              "path": ["tasks"],
+              "query": [
+                { "key": "festival_id", "value": "{{festivalId}}", "description": "Optional filter" },
+                { "key": "status", "value": "planned", "description": "Optional filter: 'planned', 'in_progress', or 'done'" }
+              ]
+            },
+            "description": "Public — no auth required."
+          }
+        },
+        {
+          "name": "Get Task by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{taskId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["tasks", "{{taskId}}"]
+            },
+            "description": "Public — no auth required. 404 if not found."
+          }
+        },
+        {
+          "name": "Update Task",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"in_progress\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{taskId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["tasks", "{{taskId}}"]
+            },
+            "description": "Requires organizer auth. Partial update. `status`, if sent, must be exactly 'planned', 'in_progress', or 'done' (400 otherwise, enforced by a DB CHECK constraint)."
+          }
+        },
+        {
+          "name": "Delete Task",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/tasks/{{taskId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["tasks", "{{taskId}}"]
+            },
+            "description": "Requires organizer auth. HARD delete (row is actually removed). Returns 400 if the task still has task_assignments — remove those first via Task Assignments > Delete."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Task Assignments",
+      "description": "Links a member to a task (volunteer sign-up). HARD delete, no soft-delete concept here.",
+      "item": [
+        {
+          "name": "Create Task Assignment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task_id\": {{taskId}},\n  \"member_id\": {{memberId}}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/task-assignments",
+              "host": ["{{baseUrl}}"],
+              "path": ["task-assignments"]
+            },
+            "description": "Requires organizer auth. Both `task_id` and `member_id` are required and must reference existing rows. `signed_up_at` is set automatically (now())."
+          }
+        },
+        {
+          "name": "List Task Assignments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/task-assignments?task_id={{taskId}}&member_id={{memberId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["task-assignments"],
+              "query": [
+                { "key": "task_id", "value": "{{taskId}}", "description": "Optional filter" },
+                { "key": "member_id", "value": "{{memberId}}", "description": "Optional filter" }
+              ]
+            },
+            "description": "Public — no auth required."
+          }
+        },
+        {
+          "name": "Get Task Assignment by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/task-assignments/{{taskAssignmentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["task-assignments", "{{taskAssignmentId}}"]
+            },
+            "description": "Public — no auth required. 404 if not found."
+          }
+        },
+        {
+          "name": "Delete Task Assignment",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/task-assignments/{{taskAssignmentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["task-assignments", "{{taskAssignmentId}}"]
+            },
+            "description": "Requires organizer auth. HARD delete. Useful to run before deleting a Task that's blocked by this assignment. Returns 204."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Availability",
+      "description": "Whether a member is available on a given date. HARD delete, no soft-delete concept here.",
+      "item": [
+        {
+          "name": "Create Availability",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"member_id\": {{memberId}},\n  \"date\": \"2026-08-25\",\n  \"is_available\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/availability",
+              "host": ["{{baseUrl}}"],
+              "path": ["availability"]
+            },
+            "description": "Requires organizer auth. `member_id`, `date` (YYYY-MM-DD), and `is_available` (boolean) are all required — `is_available` must be a real boolean, not a truthy string."
+          }
+        },
+        {
+          "name": "List Availability",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/availability?member_id={{memberId}}&date=2026-08-25",
+              "host": ["{{baseUrl}}"],
+              "path": ["availability"],
+              "query": [
+                { "key": "member_id", "value": "{{memberId}}", "description": "Optional filter" },
+                { "key": "date", "value": "2026-08-25", "description": "Optional filter, YYYY-MM-DD" }
+              ]
+            },
+            "description": "Public — no auth required."
+          }
+        },
+        {
+          "name": "Get Availability by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/availability/{{availabilityId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["availability", "{{availabilityId}}"]
+            },
+            "description": "Public — no auth required. 404 if not found."
+          }
+        },
+        {
+          "name": "Update Availability",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"is_available\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/availability/{{availabilityId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["availability", "{{availabilityId}}"]
+            },
+            "description": "Requires organizer auth. `is_available` (boolean) is required — this endpoint only updates that field."
+          }
+        },
+        {
+          "name": "Delete Availability",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/availability/{{availabilityId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["availability", "{{availabilityId}}"]
+            },
+            "description": "Requires organizer auth. HARD delete. Returns 204."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "description": "Simple DB connectivity check, not part of the resource API.",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Public — no auth required. Returns `{ status: 'ok', db: 'connected' }` or a 500 with the DB error message."
+          }
+        }
+      ]
+    }
+  ]
+}

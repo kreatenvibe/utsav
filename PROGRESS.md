@@ -189,3 +189,25 @@ auth. Ask user before picking.
   touching the native service. If Postgres auth fails locally on this
   machine again, check `netstat -ano | grep 5432` for a second listener
   before assuming the container/creds are wrong.
+
+## Testing with Postman
+`Festival_Management_API.postman_collection.json` (repo root) covers every
+route in `routes/`, organized into folders matching each resource, and is a
+valid Postman v2.1 collection — import it directly (Postman: Import > File).
+
+**Getting a token before testing protected routes:**
+1. Import the collection and set the `baseUrl` collection variable (defaults
+   to `http://localhost:3000`; point it at a deployed URL when needed).
+2. Run `Auth > Register` once with any email/password to create a user (or
+   skip this if you already registered one).
+3. Run `Auth > Login` with the same email/password. The response body is
+   `{ "token": "..." }`.
+4. Copy that token into the collection's `token` variable (Collection >
+   Variables tab, or edit it inline in the collection settings). Every
+   protected request in the collection already sends
+   `Authorization: Bearer {{token}}`, so this one paste unlocks all of them.
+5. Tokens expire after 7 days (see `authService.js`) — re-run Login and
+   re-paste when requests start failing with 401.
+
+All GET endpoints are public and need no token. Only POST/PATCH/DELETE
+requests need step 4 done first.
