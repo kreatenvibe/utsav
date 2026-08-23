@@ -1,13 +1,18 @@
 import { pool } from '../db/pool.js';
+import { colonyIdForFestival, assertColonyMember } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 const CHECK_VIOLATION = '23514';
 
-export async function createTask({ festival_id, title, planned_date, labor_required }) {
+export async function createTask({ festival_id, title, planned_date, labor_required }, actingUserId) {
   if (!festival_id || !title) {
     const err = new Error('festival_id and title are required');
     err.status = 400;
     throw err;
+  }
+  const colonyId = await colonyIdForFestival(festival_id);
+  if (colonyId !== null) {
+    await assertColonyMember(actingUserId, colonyId);
   }
   try {
     const { rows } = await pool.query(
@@ -55,8 +60,10 @@ export async function getTask(id) {
   return rows[0];
 }
 
-export async function updateTask(id, { title, planned_date, labor_required, status }) {
-  await getTask(id);
+export async function updateTask(id, { title, planned_date, labor_required, status }, actingUserId) {
+  const existing = await getTask(id);
+  const colonyId = await colonyIdForFestival(existing.festival_id);
+  await assertColonyMember(actingUserId, colonyId);
   try {
     await pool.query(
       `UPDATE tasks SET
@@ -78,8 +85,10 @@ export async function updateTask(id, { title, planned_date, labor_required, stat
   return getTask(id);
 }
 
-export async function deleteTask(id) {
-  await getTask(id);
+export async function deleteTask(id, actingUserId) {
+  const existing = await getTask(id);
+  const colonyId = await colonyIdForFestival(existing.festival_id);
+  await assertColonyMember(actingUserId, colonyId);
   try {
     await pool.query('DELETE FROM tasks WHERE task_id = $1', [id]);
   } catch (err) {

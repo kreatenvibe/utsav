@@ -1,16 +1,32 @@
 import { pool } from '../db/pool.js';
+import { assertColonyAdmin } from './colonyMembershipService.js';
 
-export async function createColony({ name, location }) {
+export async function createColony({ name, location }, actingUserId) {
   if (!name) {
     const err = new Error('name is required');
     err.status = 400;
     throw err;
   }
-  const { rows } = await pool.query(
-    'INSERT INTO colony (name, location) VALUES ($1, $2) RETURNING *',
-    [name, location ?? null]
-  );
-  return rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      'INSERT INTO colony (name, location) VALUES ($1, $2) RETURNING *',
+      [name, location ?? null]
+    );
+    const colony = rows[0];
+    await client.query(
+      `INSERT INTO colony_memberships (colony_id, user_id, role) VALUES ($1, $2, 'admin')`,
+      [colony.colony_id, actingUserId]
+    );
+    await client.query('COMMIT');
+    return colony;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function listColonies() {
@@ -28,8 +44,9 @@ export async function getColony(id) {
   return rows[0];
 }
 
-export async function updateColony(id, { name, location }) {
+export async function updateColony(id, { name, location }, actingUserId) {
   await getColony(id);
+  await assertColonyAdmin(actingUserId, id);
   const { rows } = await pool.query(
     `UPDATE colony SET
        name = COALESCE($2, name),

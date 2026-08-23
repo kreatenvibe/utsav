@@ -5,7 +5,7 @@ export const router = Router();
 
 router.post('/', async (req, res, next) => {
   try {
-    res.status(201).json(await expensePaymentService.createExpensePayment(req.body));
+    res.status(201).json(await expensePaymentService.createExpensePayment(req.body, req.user.user_id));
   } catch (err) {
     next(err);
   }
@@ -30,7 +30,7 @@ router.get('/:id', async (req, res, next) => {
 
 router.delete('/:id', async (req, res, next) => {
   try {
-    await expensePaymentService.deleteExpensePayment(req.params.id);
+    await expensePaymentService.deleteExpensePayment(req.params.id, req.user.user_id);
     res.status(204).end();
   } catch (err) {
     next(err);

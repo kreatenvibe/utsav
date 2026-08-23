@@ -1,12 +1,17 @@
 import { pool } from '../db/pool.js';
+import { colonyIdForTask, assertColonyMember } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
-export async function createTaskAssignment({ task_id, member_id }) {
+export async function createTaskAssignment({ task_id, member_id }, actingUserId) {
   if (!task_id || !member_id) {
     const err = new Error('task_id and member_id are required');
     err.status = 400;
     throw err;
+  }
+  const colonyId = await colonyIdForTask(task_id);
+  if (colonyId !== null) {
+    await assertColonyMember(actingUserId, colonyId);
   }
   try {
     const { rows } = await pool.query(
@@ -54,7 +59,9 @@ export async function getTaskAssignment(id) {
   return rows[0];
 }
 
-export async function deleteTaskAssignment(id) {
-  await getTaskAssignment(id);
+export async function deleteTaskAssignment(id, actingUserId) {
+  const existing = await getTaskAssignment(id);
+  const colonyId = await colonyIdForTask(existing.task_id);
+  await assertColonyMember(actingUserId, colonyId);
   await pool.query('DELETE FROM task_assignments WHERE assignment_id = $1', [id]);
 }

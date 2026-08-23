@@ -1,4 +1,5 @@
 import { pool } from '../db/pool.js';
+import { colonyIdForFestival, assertColonyMember } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
@@ -9,11 +10,15 @@ const BASE_SELECT = `
 `;
 const GROUP_BY = ' GROUP BY e.expense_id ORDER BY e.expense_id';
 
-export async function createExpense({ festival_id, purpose, vendor_name, amount_planned }) {
+export async function createExpense({ festival_id, purpose, vendor_name, amount_planned }, actingUserId) {
   if (!festival_id || !amount_planned) {
     const err = new Error('festival_id and amount_planned are required');
     err.status = 400;
     throw err;
+  }
+  const colonyId = await colonyIdForFestival(festival_id);
+  if (colonyId !== null) {
+    await assertColonyMember(actingUserId, colonyId);
   }
   try {
     const { rows } = await pool.query(
@@ -61,13 +66,17 @@ export async function getExpense(id) {
   return rows[0];
 }
 
-export async function deleteExpense(id) {
-  await getExpense(id);
+export async function deleteExpense(id, actingUserId) {
+  const existing = await getExpense(id);
+  const colonyId = await colonyIdForFestival(existing.festival_id);
+  await assertColonyMember(actingUserId, colonyId);
   await pool.query('UPDATE expenses SET deleted_at = now() WHERE expense_id = $1', [id]);
 }
 
-export async function updateExpense(id, { purpose, vendor_name, amount_planned, status }) {
-  await getExpense(id);
+export async function updateExpense(id, { purpose, vendor_name, amount_planned, status }, actingUserId) {
+  const existing = await getExpense(id);
+  const colonyId = await colonyIdForFestival(existing.festival_id);
+  await assertColonyMember(actingUserId, colonyId);
   if (status && !['open', 'settled'].includes(status)) {
     const err = new Error("status must be 'open' or 'settled'");
     err.status = 400;

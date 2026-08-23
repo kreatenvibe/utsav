@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Festival Management API",
-    "description": "Backend API for the community festival management app (donations, expenses, tasks, volunteers, multi-colony support). All GET routes are public; every POST/PUT/PATCH/DELETE route requires a JWT via `Authorization: Bearer {{token}}` (see the Auth folder to obtain one).\n\nSet the `baseUrl` and `token` collection variables before running requests.",
+    "description": "Backend API for the community festival management app (donations, expenses, tasks, volunteers, multi-colony support). Almost all GET routes are public; every POST/PUT/PATCH/DELETE route requires a JWT via `Authorization: Bearer {{token}}` (see the Auth folder to obtain one).\n\nColonies now have a membership model (see the Colonies folder): creating a colony makes you its first admin, and writes to anything scoped under a colony (its festivals, expected donations, donations tied to an expectation, expenses, expense payments, tasks, task assignments) require the caller to be a member of that colony — a 403 otherwise. `GET /colonies/mine` and `GET /colonies/:id/members` are the only two GETs in this whole API that require a token, since they expose identity/email data. Managing membership itself (add/change-role/remove) requires being an ADMIN of the colony, not just a member. Walk-in donations (no `expected_id`), `availability`, `members` (volunteers), and `donors` are NOT colony-scoped — they have no colony/festival link in the schema, so any authenticated user can still write them.\n\nSet the `baseUrl` and `token` collection variables before running requests. For the membership endpoints below, also set `memberUserId` (the target user's numeric id) and `memberEmail` (their registered email) — register a second user via Auth > Register first if you want to test these end-to-end.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "f3f1a6b0-6b1a-4b1a-9c1a-festivalmgmtapi"
   },
@@ -18,7 +18,9 @@
     { "key": "expensePaymentId", "value": "1", "type": "string" },
     { "key": "taskId", "value": "1", "type": "string" },
     { "key": "taskAssignmentId", "value": "1", "type": "string" },
-    { "key": "availabilityId", "value": "1", "type": "string" }
+    { "key": "availabilityId", "value": "1", "type": "string" },
+    { "key": "memberUserId", "value": "2", "type": "string" },
+    { "key": "memberEmail", "value": "rohit.deshmukh@example.com", "type": "string" }
   ],
   "item": [
     {
@@ -39,7 +41,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["auth", "register"]
             },
-            "description": "Creates a new user. No auth required. There is no roles system yet — any registered user is effectively an \"organizer\" with full write access. Returns 201 with `{ user_id, email }` (password hash never included). Duplicate email returns 409."
+            "description": "Creates a new user. No auth required. Registering alone grants no write access anywhere — a user can only write to a colony's data once they're a member of it (see Colonies > Create Colony, which auto-admins the creator, and Colonies > Add Colony Member for adding others). Returns 201 with `{ user_id, email }` (password hash never included). Duplicate email returns 409."
           }
         },
         {
@@ -63,7 +65,7 @@
     },
     {
       "name": "Colonies",
-      "description": "No DELETE endpoint exists for colonies yet — cascade behavior (what happens to festivals under a deleted colony) hasn't been decided, so deletion is deliberately deferred.",
+      "description": "No DELETE endpoint exists for colonies yet — cascade behavior (what happens to festivals under a deleted colony) hasn't been decided, so deletion is deliberately deferred. Colonies have a membership model: creating one makes you its first admin; only members can write data scoped under a colony, and only admins can manage membership or rename/relocate the colony itself.",
       "item": [
         {
           "name": "Create Colony",
@@ -82,7 +84,22 @@
               "host": ["{{baseUrl}}"],
               "path": ["colonies"]
             },
-            "description": "Requires organizer auth. Only `name` is required; `location` is optional."
+            "description": "Requires auth. Only `name` is required; `location` is optional. The caller automatically becomes this colony's first member, with the `admin` role."
+          }
+        },
+        {
+          "name": "List My Colonies",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/colonies/mine",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "mine"]
+            },
+            "description": "Requires auth (one of only two GETs in this API that do). Returns the colonies the caller is a member of, each row including the caller's `role` ('admin' or 'member') in that colony."
           }
         },
         {
@@ -128,14 +145,84 @@
               "host": ["{{baseUrl}}"],
               "path": ["colonies", "{{colonyId}}"]
             },
-            "description": "Requires organizer auth. Partial update — omit any field you don't want to change, it stays as-is (COALESCE semantics)."
+            "description": "Requires the caller to be an ADMIN of this colony (not just any member) — 403 otherwise. Partial update — omit any field you don't want to change, it stays as-is (COALESCE semantics)."
+          }
+        },
+        {
+          "name": "List Colony Members",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/colonies/{{colonyId}}/members",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "{{colonyId}}", "members"]
+            },
+            "description": "Requires auth (one of only two GETs in this API that do — membership rows expose other users' emails). Does NOT require the caller to be a member of this colony themselves, just logged in. Returns each membership row with the member's `user_id`, `email`, and `role`."
+          }
+        },
+        {
+          "name": "Add Colony Member",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{memberEmail}}\",\n  \"role\": \"member\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/colonies/{{colonyId}}/members",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "{{colonyId}}", "members"]
+            },
+            "description": "Requires the caller to be an ADMIN of this colony. `email` must belong to an already-registered user (404 if not — there's no invite-by-email-for-strangers flow) and must not already be a member of this colony (409 if so). `role` is optional, defaults to `member`; must be `member` or `admin`."
+          }
+        },
+        {
+          "name": "Update Colony Member Role",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"admin\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/colonies/{{colonyId}}/members/{{memberUserId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "{{colonyId}}", "members", "{{memberUserId}}"]
+            },
+            "description": "Requires the caller to be an ADMIN of this colony. `role` is required, must be `member` or `admin`. Rejected with 400 if this would demote the colony's last remaining admin — a colony can never end up with zero admins."
+          }
+        },
+        {
+          "name": "Remove Colony Member",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/colonies/{{colonyId}}/members/{{memberUserId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "{{colonyId}}", "members", "{{memberUserId}}"]
+            },
+            "description": "Requires the caller to be an ADMIN of this colony. Rejected with 400 if the target is the colony's last remaining admin. There's no self-service \"leave a colony\" yet — an admin has to remove you. Returns 204."
           }
         }
       ]
     },
     {
       "name": "Festivals",
-      "description": "current_balance is always computed on read (SUM of matched donations minus SUM of expense_payments) — it is never stored or accepted on PATCH. No DELETE endpoint yet (deferred, same reason as colonies).",
+      "description": "current_balance is always computed on read (SUM of matched donations minus SUM of expense_payments) — it is never stored or accepted on PATCH. No DELETE endpoint yet (deferred, same reason as colonies). Writes require the caller to be a member (admin or plain) of the festival's colony — 403 otherwise.",
       "item": [
         {
           "name": "Create Festival",
@@ -154,7 +241,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["festivals"]
             },
-            "description": "Requires organizer auth. `colony_id`, `name`, and `year` are all required; `colony_id` must reference an existing colony (400 if not)."
+            "description": "Requires the caller to be a member of `colony_id`'s colony (403 otherwise). `colony_id`, `name`, and `year` are all required; `colony_id` must reference an existing colony (400 if not)."
           }
         },
         {
@@ -203,14 +290,14 @@
               "host": ["{{baseUrl}}"],
               "path": ["festivals", "{{festivalId}}"]
             },
-            "description": "Requires organizer auth. Only `name` and `year` are updatable — `current_balance` is always derived and silently ignored if sent."
+            "description": "Requires the caller to be a member of this festival's colony (403 otherwise). Only `name` and `year` are updatable — `current_balance` is always derived and silently ignored if sent."
           }
         }
       ]
     },
     {
       "name": "Members",
-      "description": "Volunteers/members of a colony. No DELETE endpoint yet (deferred).",
+      "description": "Volunteers/organizers — a global roster, NOT the same thing as colony membership (see Colonies folder for who can log in and manage a colony). This table has no colony_id, so writes here only require being logged in, not being a member of any particular colony. No DELETE endpoint yet (deferred).",
       "item": [
         {
           "name": "Create Member",
@@ -282,7 +369,7 @@
     },
     {
       "name": "Donors",
-      "description": "People/entities who pledge or give donations. No DELETE endpoint yet (deferred).",
+      "description": "People/entities who pledge or give donations — a global roster with no colony_id, so writes here only require being logged in, not membership in any particular colony. No DELETE endpoint yet (deferred).",
       "item": [
         {
           "name": "Create Donor",
@@ -354,7 +441,7 @@
     },
     {
       "name": "Expected Donations",
-      "description": "Pledges tied to a donor + festival. total_donated is computed by summing linked (non-deleted) donations, not stored. No DELETE endpoint yet (deferred).",
+      "description": "Pledges tied to a donor + festival. total_donated is computed by summing linked (non-deleted) donations, not stored. No DELETE endpoint yet (deferred). Writes require the caller to be a member of the linked festival's colony — 403 otherwise.",
       "item": [
         {
           "name": "Create Expected Donation",
@@ -373,7 +460,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["expected-donations"]
             },
-            "description": "Requires organizer auth. `donor_id`, `festival_id`, `expected_amount`, and `year` are required; `purpose` is optional. `status` defaults to `open` and cannot be set on create."
+            "description": "Requires the caller to be a member of `festival_id`'s colony (403 otherwise). `donor_id`, `festival_id`, `expected_amount`, and `year` are required; `purpose` is optional. `status` defaults to `open` and cannot be set on create."
           }
         },
         {
@@ -424,14 +511,14 @@
               "host": ["{{baseUrl}}"],
               "path": ["expected-donations", "{{expectedDonationId}}"]
             },
-            "description": "Requires organizer auth. Partial update. `status`, if sent, must be exactly 'open' or 'closed' (400 otherwise) — it is set explicitly, never auto-derived from totals."
+            "description": "Requires the caller to be a member of this expected donation's festival's colony (403 otherwise). Partial update. `status`, if sent, must be exactly 'open' or 'closed' (400 otherwise) — it is set explicitly, never auto-derived from totals."
           }
         }
       ]
     },
     {
       "name": "Donations",
-      "description": "Actual money received. Amounts are immutable once created (never edited) — only new rows are added, and delete is a SOFT delete (deleted_at) so history is preserved.",
+      "description": "Actual money received. Amounts are immutable once created (never edited) — only new rows are added, and delete is a SOFT delete (deleted_at) so history is preserved. If `expected_id` is set, writes require the caller to be a member of that expectation's festival's colony (403 otherwise). Walk-in donations with no `expected_id` are NOT colony-scoped — there's no schema path from a walk-in donation to a colony, so any authenticated user can create/delete those.",
       "item": [
         {
           "name": "Create Donation",
@@ -450,7 +537,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["donations"]
             },
-            "description": "Requires organizer auth. `donor_id`, `amount`, and `date` (YYYY-MM-DD) are required. `expected_id` is optional — omit it for a walk-in donation not tied to any pledge. `collected_by` (member id) is also optional."
+            "description": "Requires auth. If `expected_id` is set, the caller must be a member of that expectation's festival's colony (403 otherwise). `donor_id`, `amount`, and `date` (YYYY-MM-DD) are required. `expected_id` is optional — omit it for a walk-in donation not tied to any pledge (walk-ins skip the colony check entirely, see folder description). `collected_by` (member id) is also optional."
           }
         },
         {
@@ -495,14 +582,14 @@
               "host": ["{{baseUrl}}"],
               "path": ["donations", "{{donationId}}"]
             },
-            "description": "Requires organizer auth. This is a SOFT delete — sets `deleted_at`, the row and its `amount` are never actually removed or edited. Affects the linked expected_donation's `total_donated` and the festival's `current_balance` on next read. Returns 204 with no body."
+            "description": "Requires auth; if the donation has an `expected_id`, also requires membership in that expectation's festival's colony (403 otherwise) — walk-in donations skip this check. This is a SOFT delete — sets `deleted_at`, the row and its `amount` are never actually removed or edited. Affects the linked expected_donation's `total_donated` and the festival's `current_balance` on next read. Returns 204 with no body."
           }
         }
       ]
     },
     {
       "name": "Expenses",
-      "description": "Planned/actual spend against a festival. Delete is a SOFT delete (deleted_at), same rationale as Donations.",
+      "description": "Planned/actual spend against a festival. Delete is a SOFT delete (deleted_at), same rationale as Donations. Writes require the caller to be a member of the linked festival's colony — 403 otherwise.",
       "item": [
         {
           "name": "Create Expense",
@@ -521,7 +608,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["expenses"]
             },
-            "description": "Requires organizer auth. `festival_id` and `amount_planned` are required; `purpose` and `vendor_name` are optional. `status` defaults to `open`."
+            "description": "Requires the caller to be a member of `festival_id`'s colony (403 otherwise). `festival_id` and `amount_planned` are required; `purpose` and `vendor_name` are optional. `status` defaults to `open`."
           }
         },
         {
@@ -571,7 +658,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["expenses", "{{expenseId}}"]
             },
-            "description": "Requires organizer auth. Partial update. `status`, if sent, must be exactly 'open' or 'settled' (400 otherwise)."
+            "description": "Requires the caller to be a member of this expense's festival's colony (403 otherwise). Partial update. `status`, if sent, must be exactly 'open' or 'settled' (400 otherwise)."
           }
         },
         {
@@ -586,14 +673,14 @@
               "host": ["{{baseUrl}}"],
               "path": ["expenses", "{{expenseId}}"]
             },
-            "description": "Requires organizer auth. SOFT delete (deleted_at) — disappears from list/get, feeds into festival `current_balance`. Existing expense_payments under it are NOT cascaded/blocked. Returns 204."
+            "description": "Requires the caller to be a member of this expense's festival's colony (403 otherwise). SOFT delete (deleted_at) — disappears from list/get, feeds into festival `current_balance`. Existing expense_payments under it are NOT cascaded/blocked. Returns 204."
           }
         }
       ]
     },
     {
       "name": "Expense Payments",
-      "description": "Actual money paid out against an expense. Delete is a SOFT delete — same immutable-money-fields rule as Donations.",
+      "description": "Actual money paid out against an expense. Delete is a SOFT delete — same immutable-money-fields rule as Donations. Writes require the caller to be a member of the linked expense's festival's colony — 403 otherwise.",
       "item": [
         {
           "name": "Create Expense Payment",
@@ -612,7 +699,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["expense-payments"]
             },
-            "description": "Requires organizer auth. `expense_id`, `amount`, and `date` (YYYY-MM-DD) are required; `paid_by` (member id) is optional. Note: this is NOT blocked from being created against a soft-deleted expense (a known gap, not yet fixed)."
+            "description": "Requires the caller to be a member of `expense_id`'s festival's colony (403 otherwise). `expense_id`, `amount`, and `date` (YYYY-MM-DD) are required; `paid_by` (member id) is optional. Note: this is NOT blocked from being created against a soft-deleted expense (a known gap, not yet fixed)."
           }
         },
         {
@@ -656,14 +743,14 @@
               "host": ["{{baseUrl}}"],
               "path": ["expense-payments", "{{expensePaymentId}}"]
             },
-            "description": "Requires organizer auth. SOFT delete — affects the parent expense's `total_paid` and the festival's `current_balance` on next read. Returns 204."
+            "description": "Requires the caller to be a member of this payment's expense's festival's colony (403 otherwise). SOFT delete — affects the parent expense's `total_paid` and the festival's `current_balance` on next read. Returns 204."
           }
         }
       ]
     },
     {
       "name": "Tasks",
-      "description": "Work items for a festival. Delete here is a HARD delete (unlike money tables) — blocked with a 400 if task_assignments still reference the task.",
+      "description": "Work items for a festival. Delete here is a HARD delete (unlike money tables) — blocked with a 400 if task_assignments still reference the task. Writes require the caller to be a member of the linked festival's colony — 403 otherwise.",
       "item": [
         {
           "name": "Create Task",
@@ -682,7 +769,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["tasks"]
             },
-            "description": "Requires organizer auth. `festival_id` and `title` are required; `planned_date` and `labor_required` are optional. `status` defaults to `planned`."
+            "description": "Requires the caller to be a member of `festival_id`'s colony (403 otherwise). `festival_id` and `title` are required; `planned_date` and `labor_required` are optional. `status` defaults to `planned`."
           }
         },
         {
@@ -732,7 +819,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["tasks", "{{taskId}}"]
             },
-            "description": "Requires organizer auth. Partial update. `status`, if sent, must be exactly 'planned', 'in_progress', or 'done' (400 otherwise, enforced by a DB CHECK constraint)."
+            "description": "Requires the caller to be a member of this task's festival's colony (403 otherwise). Partial update. `status`, if sent, must be exactly 'planned', 'in_progress', or 'done' (400 otherwise, enforced by a DB CHECK constraint)."
           }
         },
         {
@@ -747,14 +834,14 @@
               "host": ["{{baseUrl}}"],
               "path": ["tasks", "{{taskId}}"]
             },
-            "description": "Requires organizer auth. HARD delete (row is actually removed). Returns 400 if the task still has task_assignments — remove those first via Task Assignments > Delete."
+            "description": "Requires the caller to be a member of this task's festival's colony (403 otherwise). HARD delete (row is actually removed). Returns 400 if the task still has task_assignments — remove those first via Task Assignments > Delete."
           }
         }
       ]
     },
     {
       "name": "Task Assignments",
-      "description": "Links a member to a task (volunteer sign-up). HARD delete, no soft-delete concept here.",
+      "description": "Links a member to a task (volunteer sign-up). HARD delete, no soft-delete concept here. Writes require the caller to be a member of the linked task's festival's colony — 403 otherwise.",
       "item": [
         {
           "name": "Create Task Assignment",
@@ -773,7 +860,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["task-assignments"]
             },
-            "description": "Requires organizer auth. Both `task_id` and `member_id` are required and must reference existing rows. `signed_up_at` is set automatically (now())."
+            "description": "Requires the caller to be a member of `task_id`'s festival's colony (403 otherwise). Both `task_id` and `member_id` are required and must reference existing rows. `signed_up_at` is set automatically (now())."
           }
         },
         {
@@ -818,14 +905,14 @@
               "host": ["{{baseUrl}}"],
               "path": ["task-assignments", "{{taskAssignmentId}}"]
             },
-            "description": "Requires organizer auth. HARD delete. Useful to run before deleting a Task that's blocked by this assignment. Returns 204."
+            "description": "Requires the caller to be a member of this assignment's task's festival's colony (403 otherwise). HARD delete. Useful to run before deleting a Task that's blocked by this assignment. Returns 204."
           }
         }
       ]
     },
     {
       "name": "Availability",
-      "description": "Whether a member is available on a given date. HARD delete, no soft-delete concept here.",
+      "description": "Whether a member is available on a given date. HARD delete, no soft-delete concept here. This table has no festival_id/colony_id at all, so it's NOT colony-scoped — writes here only require being logged in, not membership in any particular colony (a known gap, flagged not silently decided).",
       "item": [
         {
           "name": "Create Availability",

@@ -12,13 +12,73 @@
 All four numbered build-order layers have routes/services, plus
 `festival.current_balance` is derived, DELETE exists for
 donations/expense_payments/expenses (soft) and tasks/availability (hard),
-and JWT auth now guards all write endpoints.
-Next: not yet decided — candidates are DELETE for
-colonies/festivals/members/donors/expected_donations (still deferred,
-cascade behavior not decided), or a real roles/permissions system on top of
-auth. Ask user before picking.
+JWT auth guards all write endpoints, and colony membership/write-permission
+is now enforced (see below). Next: not yet decided — candidates are DELETE
+for colonies/festivals/members/donors/expected_donations (still deferred,
+cascade behavior not decided), or the deferred gaps flagged under colony
+membership below (walk-in donations, availability, self-leave). Ask user
+before picking.
 
 ## Done
+- **Colony membership / write-permission model** (see
+  `plans/colony-membership.md`): new `colony_memberships` table
+  (`migrations/009_colony_memberships.sql`: `colony_id`, `user_id`, `role`
+  `'admin'|'member'`, unique per colony+user) — named to avoid confusion with
+  the existing unrelated `members` table (festival volunteers, no relation to
+  login identity). `services/colonyMembershipService.js` (new): membership/
+  admin checks (`assertColonyMember`/`assertColonyAdmin`, 403), colony_id
+  resolvers for each FK chain (`colonyIdForFestival`/`colonyIdForExpense`/
+  `colonyIdForTask`/`colonyIdForExpectedDonation`), `listMyColonies`,
+  `listColonyMembers`, `addMember` (409 on dup), `updateMemberRole` and
+  `removeMember` (both reject shrinking a colony to zero admins, 400).
+  `colonyService.createColony` now wraps the colony insert + auto-admin
+  membership insert in one transaction (mirrors `db/migrate.js`'s
+  BEGIN/COMMIT/ROLLBACK style — first multi-table invariant in the app).
+  `colonyService.updateColony` is now **admin-only** (confirmed with user —
+  treated like a WhatsApp group's settings, not regular member-writable
+  content). New routes on `routes/colonies.js`: `GET /mine` (registered before
+  `GET /:id`), `GET /:id/members`, `POST /:id/members`, `PATCH
+  /:id/members/:userId`, `DELETE /:id/members/:userId` — the two GETs are the
+  only reads in the whole app that require auth (membership rows expose other
+  users' emails). Every other mutating service (festivals, expected_donations,
+  donations, expenses, expense_payments, tasks, task_assignments) now takes an
+  extra `actingUserId` param (never merged into the body object, always the
+  verified `req.user.user_id`) and asserts colony membership before writing,
+  resolved via the appropriate FK chain; create paths skip the check if the
+  raw id doesn't resolve at all (existing FK-violation 400 still fires
+  unchanged); update/delete paths already fetch the row first (existing
+  `getX(id)` calls), so no skip logic needed there — not an info leak since
+  every GET in this app is already fully public.
+  **Deliberately left unscoped** (flagged, not silently decided): walk-in
+  donations (`donations.expected_id IS NULL` — no festival/colony link
+  possible under the current schema), `availability` (no `festival_id`/
+  `colony_id` column at all), `members`/`donors` (global rosters, no
+  `colony_id` column). **Also flagged**: no self-service "leave a colony" —
+  only admins can remove members, including other admins (down to but not
+  including the last one).
+  Split `index.js` into `app.js` (exports the Express `app`, no `.listen()`)
+  + a thin `index.js` (imports `app`, calls `.listen()`) so the app can be
+  driven in-process by tests. Added `supertest` devDependency,
+  `"test": "node --test"` (Node's built-in runner, no new test-runner dep).
+  New `test/colonyMembership.test.js` (9 cases) — runs against a real
+  Postgres (no mocking, matching this repo's existing manual-verification
+  philosophy), covers: colony creation auto-admins the creator; non-members
+  blocked (403) on colony/festival/expense/expense_payment/task/
+  task_assignment/donation writes; non-admin blocked (403) from
+  managing membership; sole-admin removal/demotion rejected (400);
+  unauthenticated writes still 401; reads still public with no token; the
+  expected_id→festival→colony donation chain is enforced but walk-in
+  donations (no expected_id) remain unscoped by design.
+  **DB caveat**: `.env`'s `DATABASE_URL` currently points at a Render Postgres
+  instance using its *internal* hostname (`dpg-...-a` with no region suffix),
+  which only resolves from inside Render's network — unreachable from this
+  machine. Verified this feature (migration + full test suite, all 9 passing)
+  against the local docker-compose Postgres instead (temporarily flipped
+  which `DATABASE_URL` line was active, then restored `.env` to the Render
+  line afterward). **`migrations/009_colony_memberships.sql` has NOT been
+  applied to the Render DB** — that needs to happen through Render's own
+  tooling (dashboard console, or `npm run migrate` from an environment that
+  can reach the internal host) before this feature works against production.
 - **JWT auth** (see `plans/auth.md`): new `users` table
   (`migrations/008_users.sql`, email + bcryptjs password hash, separate from
   `members` since login identity isn't festival/volunteer data), 
@@ -180,6 +240,14 @@ auth. Ask user before picking.
   'open' to 'planned' to match.
 
 ## Lessons learned
+- **`.env`'s `DATABASE_URL` points at a Render Postgres instance by its
+  internal hostname** (`dpg-...-a`, no region suffix) — this only resolves
+  from inside Render's own network, not from a local machine. `npm run
+  migrate` and `npm test` need a reachable DB: either swap in the local
+  docker-compose line (commented out just above the Render line in `.env`)
+  and `docker compose up -d` first, or use Render's *external* connection
+  string if testing against that instance specifically. Remember to swap
+  `.env` back afterward — don't leave it pointed at localhost.
 - This machine has a **native Windows PostgreSQL service already listening on
   port 5432**, alongside Docker Desktop's port-forwarding — both bind
   `0.0.0.0:5432`. Node's `pg` client connects to the native one (wrong

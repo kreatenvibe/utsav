@@ -1,12 +1,19 @@
 import { pool } from '../db/pool.js';
+import { colonyIdForExpectedDonation, assertColonyMember } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
-export async function createDonation({ donor_id, expected_id, amount, date, collected_by }) {
+export async function createDonation({ donor_id, expected_id, amount, date, collected_by }, actingUserId) {
   if (!donor_id || !amount || !date) {
     const err = new Error('donor_id, amount, and date are required');
     err.status = 400;
     throw err;
+  }
+  if (expected_id) {
+    const colonyId = await colonyIdForExpectedDonation(expected_id);
+    if (colonyId !== null) {
+      await assertColonyMember(actingUserId, colonyId);
+    }
   }
   try {
     const { rows } = await pool.query(
@@ -56,7 +63,13 @@ export async function getDonation(id) {
   return rows[0];
 }
 
-export async function deleteDonation(id) {
-  await getDonation(id);
+export async function deleteDonation(id, actingUserId) {
+  const existing = await getDonation(id);
+  if (existing.expected_id) {
+    const colonyId = await colonyIdForExpectedDonation(existing.expected_id);
+    if (colonyId !== null) {
+      await assertColonyMember(actingUserId, colonyId);
+    }
+  }
   await pool.query('UPDATE donations SET deleted_at = now() WHERE donation_id = $1', [id]);
 }

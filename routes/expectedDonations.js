@@ -5,7 +5,7 @@ export const router = Router();
 
 router.post('/', async (req, res, next) => {
   try {
-    res.status(201).json(await expectedDonationService.createExpectedDonation(req.body));
+    res.status(201).json(await expectedDonationService.createExpectedDonation(req.body, req.user.user_id));
   } catch (err) {
     next(err);
   }
@@ -30,7 +30,7 @@ router.get('/:id', async (req, res, next) => {
 
 router.patch('/:id', async (req, res, next) => {
   try {
-    res.json(await expectedDonationService.updateExpectedDonation(req.params.id, req.body));
+    res.json(await expectedDonationService.updateExpectedDonation(req.params.id, req.body, req.user.user_id));
   } catch (err) {
     next(err);
   }

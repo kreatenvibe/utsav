@@ -5,7 +5,7 @@ export const router = Router();
 
 router.post('/', async (req, res, next) => {
   try {
-    const festival = await festivalService.createFestival(req.body);
+    const festival = await festivalService.createFestival(req.body, req.user.user_id);
     res.status(201).json(festival);
   } catch (err) {
     next(err);
@@ -30,7 +30,7 @@ router.get('/:id', async (req, res, next) => {
 
 router.patch('/:id', async (req, res, next) => {
   try {
-    res.json(await festivalService.updateFestival(req.params.id, req.body));
+    res.json(await festivalService.updateFestival(req.params.id, req.body, req.user.user_id));
   } catch (err) {
     next(err);
   }

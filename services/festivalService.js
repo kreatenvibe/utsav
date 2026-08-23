@@ -1,4 +1,5 @@
 import { pool } from '../db/pool.js';
+import { colonyExists, assertColonyMember } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
@@ -18,11 +19,14 @@ const BASE_SELECT = `
   FROM festival f
 `;
 
-export async function createFestival({ colony_id, name, year }) {
+export async function createFestival({ colony_id, name, year }, actingUserId) {
   if (!colony_id || !name || !year) {
     const err = new Error('colony_id, name, and year are required');
     err.status = 400;
     throw err;
+  }
+  if (await colonyExists(colony_id)) {
+    await assertColonyMember(actingUserId, colony_id);
   }
   try {
     const { rows } = await pool.query(
@@ -62,8 +66,9 @@ export async function getFestival(id) {
   return rows[0];
 }
 
-export async function updateFestival(id, { name, year }) {
-  await getFestival(id);
+export async function updateFestival(id, { name, year }, actingUserId) {
+  const existing = await getFestival(id);
+  await assertColonyMember(actingUserId, existing.colony_id);
   await pool.query(
     `UPDATE festival SET
        name = COALESCE($2, name),

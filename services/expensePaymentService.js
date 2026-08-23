@@ -1,12 +1,17 @@
 import { pool } from '../db/pool.js';
+import { colonyIdForExpense, assertColonyMember } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
-export async function createExpensePayment({ expense_id, amount, date, paid_by }) {
+export async function createExpensePayment({ expense_id, amount, date, paid_by }, actingUserId) {
   if (!expense_id || !amount || !date) {
     const err = new Error('expense_id, amount, and date are required');
     err.status = 400;
     throw err;
+  }
+  const colonyId = await colonyIdForExpense(expense_id);
+  if (colonyId !== null) {
+    await assertColonyMember(actingUserId, colonyId);
   }
   try {
     const { rows } = await pool.query(
@@ -52,7 +57,9 @@ export async function getExpensePayment(id) {
   return rows[0];
 }
 
-export async function deleteExpensePayment(id) {
-  await getExpensePayment(id);
+export async function deleteExpensePayment(id, actingUserId) {
+  const existing = await getExpensePayment(id);
+  const colonyId = await colonyIdForExpense(existing.expense_id);
+  await assertColonyMember(actingUserId, colonyId);
   await pool.query('UPDATE expense_payments SET deleted_at = now() WHERE payment_id = $1', [id]);
 }
