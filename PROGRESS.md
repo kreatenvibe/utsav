@@ -20,6 +20,44 @@ membership below (walk-in donations, availability, self-leave). Ask user
 before picking.
 
 ## Done
+- **Optional colony-scoping for `members`** (see
+  `plans/members-colony-scoping.md`): `migrations/010_members_colony_scoping.sql`
+  adds a nullable `colony_id INTEGER REFERENCES colony(colony_id)` to `members`
+  (plain FK, no `ON DELETE` — matches every other FK in this schema, none of
+  which has one) plus a **partial** unique index `(colony_id, phone) WHERE
+  colony_id IS NOT NULL`. `colony_memberships`/`users`/auth flow untouched, as
+  requested — this only touches `members`.
+  `memberService.createMember` now takes `actingUserId` and an optional
+  `colony_id` in the body: omit it and behavior is byte-for-byte unchanged
+  (any authenticated user, unscoped row); provide it and the caller must be a
+  **colony admin** (`assertColonyAdmin`), mirroring `festivalService
+  .createFestival`'s null-skip convention (`colonyExists` check first, skip
+  the assert and let the FK violation 400 through if the id doesn't resolve).
+  409 on duplicate `(colony_id, phone)` (same catch-and-translate pattern as
+  `colonyMembershipService.addMember`). `listMembers` gained an optional
+  `?colony_id=` filter (same shape as `listFestivals`). `updateMember`/PATCH
+  is **unchanged** — still only touches `name`/`phone`, still any
+  authenticated user, `colony_id` is immutable after creation (deliberate,
+  documented — no precedent anywhere in the app for re-parenting a row to a
+  different colony after creation).
+  **Design decision (asked to be made and documented, not silently picked):
+  phone uniqueness is per-colony, not global** — same phone number can appear
+  in multiple different colonies' rosters as distinct rows; only a duplicate
+  *within the same colony's roster* is rejected (409). Chosen because
+  `members` had zero uniqueness constraint before this, and global uniqueness
+  would have forced a cross-colony row-ownership model (reuse-or-fail) that
+  doesn't exist anywhere else in this app's flat `members`/`donors` concept.
+  `docs/BACKEND_ANALYSIS.md` updated throughout (§3 entity/relationship/
+  scoping-exceptions, §4 Members table, §5 authorization, §11 observations,
+  §12 unknowns) to reflect exactly this, including the immutable-`colony_id`
+  and any-user-can-PATCH deviations from a "full" scoping model.
+  Manually verified against the docker Postgres + running server: unscoped
+  create by a non-admin (201, unchanged), non-admin scoped create (403),
+  colony-admin scoped create (201), duplicate phone same colony (409), same
+  phone different colony (201, distinct row), bad `colony_id` (400, FK
+  violation path), `GET /members?colony_id=` filter, and PATCH with a
+  `colony_id` in the body confirmed ignored (row's `colony_id` unchanged,
+  `name` still updates).
 - **Colony membership / write-permission model** (see
   `plans/colony-membership.md`): new `colony_memberships` table
   (`migrations/009_colony_memberships.sql`: `colony_id`, `user_id`, `role`

@@ -1,19 +1,47 @@
 import { pool } from '../db/pool.js';
+import { colonyExists, assertColonyAdmin } from './colonyMembershipService.js';
 
-export async function createMember({ name, phone }) {
+const FK_VIOLATION = '23503';
+const UNIQUE_VIOLATION = '23505';
+
+export async function createMember({ name, phone, colony_id }, actingUserId) {
   if (!name) {
     const err = new Error('name is required');
     err.status = 400;
     throw err;
   }
-  const { rows } = await pool.query(
-    'INSERT INTO members (name, phone) VALUES ($1, $2) RETURNING *',
-    [name, phone ?? null]
-  );
-  return rows[0];
+  if (colony_id && (await colonyExists(colony_id))) {
+    await assertColonyAdmin(actingUserId, colony_id);
+  }
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO members (name, phone, colony_id) VALUES ($1, $2, $3) RETURNING *',
+      [name, phone ?? null, colony_id ?? null]
+    );
+    return rows[0];
+  } catch (err) {
+    if (err.code === FK_VIOLATION) {
+      const e = new Error('colony_id does not reference an existing colony');
+      e.status = 400;
+      throw e;
+    }
+    if (err.code === UNIQUE_VIOLATION) {
+      const e = new Error('a member with that phone already exists in this colony');
+      e.status = 409;
+      throw e;
+    }
+    throw err;
+  }
 }
 
-export async function listMembers() {
+export async function listMembers({ colony_id } = {}) {
+  if (colony_id) {
+    const { rows } = await pool.query(
+      'SELECT * FROM members WHERE colony_id = $1 ORDER BY member_id',
+      [colony_id]
+    );
+    return rows;
+  }
   const { rows } = await pool.query('SELECT * FROM members ORDER BY member_id');
   return rows;
 }
