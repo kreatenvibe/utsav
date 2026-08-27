@@ -64,3 +64,29 @@ export async function loginUser({ email, password }) {
   );
   return { token };
 }
+
+export async function changePassword(userId, { current_password, new_password }) {
+  if (!current_password || !new_password) {
+    const err = new Error('current_password and new_password are required');
+    err.status = 400;
+    throw err;
+  }
+
+  const { rows } = await pool.query('SELECT password_hash FROM users WHERE user_id = $1', [userId]);
+  const user = rows[0];
+  if (!user) {
+    const err = new Error('user not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const match = await bcrypt.compare(current_password, user.password_hash);
+  if (!match) {
+    const err = new Error('current password is incorrect');
+    err.status = 401;
+    throw err;
+  }
+
+  const passwordHash = await bcrypt.hash(new_password, SALT_ROUNDS);
+  await pool.query('UPDATE users SET password_hash = $2 WHERE user_id = $1', [userId, passwordHash]);
+}

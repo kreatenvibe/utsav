@@ -20,6 +20,89 @@ membership below (walk-in donations, availability, self-leave). Ask user
 before picking.
 
 ## Done
+- **Member bulk import + login granting/promotion** (see
+  `plans/members-bulk-import-login.md`): `migrations/011_members_login_link.sql`
+  adds `members.user_id INTEGER UNIQUE REFERENCES users(user_id)`, nullable —
+  a member optionally links to a login account; the UNIQUE direction means a
+  `users` row backs at most one `members` row. `users` itself is unchanged.
+  New in `services/memberService.js`: `bulkImportMembers`, `grantLogin`,
+  `resetPassword`, `setColonyRole`, plus an internal `parseRoster` that
+  dispatches to `csv-parse` (`.csv`) or `exceljs` (`.xlsx`/`.xls`) by file
+  extension. New in `services/authService.js`: `changePassword`. New routes:
+  `POST /members/bulk` (multipart, `multer` memory storage, 5MB cap),
+  `POST /members/:id/grant-login`, `POST /members/:id/reset-password`,
+  `PATCH /members/:id/colony-role`, `PATCH /auth/change-password`.
+  **Password strategy, confirmed with user**: organizer-supplied shared
+  password per bulk-import call (`initial_password`, required), not
+  system-generated — "nothing secret between members of the same colony."
+  A per-row `password` column in the file overrides the shared one for that
+  person only. No forced password-change flag (would undercut the point);
+  `PATCH /auth/change-password` exists as a self-service escape hatch for
+  anyone who later wants a private password.
+  **Row processing**: independent across rows (no whole-file transaction, so
+  one bad row doesn't fail the batch), but each row's member-insert +
+  optional login-grant is atomic *together* (its own BEGIN/COMMIT/ROLLBACK,
+  mirroring `colonyService.createColony`'s existing transaction precedent) —
+  avoids a row leaving a member with no login when the file said it should
+  have one, or a dangling `users` row nothing points at.
+  **Duplicate-phone handling, explicitly flagged and resolved**: dedup is
+  scoped **per-colony only**, reusing the existing partial unique index
+  (`members_colony_id_phone_unique` from migration 010) — a dup is `skipped`
+  and reported, the existing row is untouched. Deliberately **not** extended
+  to check collisions against legacy *unscoped* (`colony_id IS NULL`) member
+  rows: migration 010 already settled "phone uniqueness is per-colony, not
+  global" for exactly this reason (no cross-colony row-ownership model exists
+  anywhere else in this app), and `POST /members` itself has never checked
+  against unscoped rows either — a one-off global check just for bulk-import
+  would be inconsistent and would silently drop legitimate new roster rows
+  because of old data the organizer can't see.
+  Response shape: `{ created: [...], skipped: [...], errors: [...] }`, each
+  entry carrying `row` (1-based, data rows only), `phone`, and (for
+  created rows) `member_id`/`login_granted`/`email`, or (for skipped/error
+  rows) a `reason` string. `errors` covers everything row-level that isn't
+  the duplicate-phone case: missing `name`/`phone`, an `email` already
+  registered (whether against an existing account or a duplicate within the
+  same file — both surface as `"email already registered"`, disambiguated
+  internally by Postgres's `err.constraint`: `members_colony_id_phone_unique`
+  → skipped, `users_email_key` → error).
+  **Authorization**: `POST /members/bulk` is always colony-scoped and
+  colony-admin-only (no null-skip convention — a bulk roster upload is
+  inherently "the organizer's colony," unlike `POST /members`'s optional
+  `colony_id`). `grant-login`/`reset-password` reuse `createMember`'s
+  existing convention instead of inventing a new rule: colony-admin required
+  if the target member has a `colony_id`, any authenticated user if it's a
+  legacy unscoped row. `PATCH /members/:id/colony-role` does no
+  authorization of its own — 404 via `getMember`, 400 if `member.user_id`
+  is null, then delegates entirely to the existing
+  `colonyMembershipService.addMember` (first grant, looked up by email
+  resolved from the member's linked `user_id`) or `updateMemberRole` (role
+  already exists, called directly with the `user_id`) — both already
+  `assertColonyAdmin` and already have the sole-admin-can't-be-demoted guard,
+  so nothing needed re-implementing.
+  **Dependency note**: `xlsx` (SheetJS)'s npm-published build (0.18.5, the
+  last version ever published there) has two unpatched advisories
+  (prototype pollution, ReDoS), "no fix available" per `npm audit" — since
+  this endpoint parses untrusted uploaded files, used `exceljs` instead (one
+  low-relevance transitive moderate advisory on `uuid`, unrelated code path)
+  plus `csv-parse` for `.csv`. New deps: `multer`, `exceljs`, `csv-parse`.
+  Manually verified against the docker Postgres + running server: CSV bulk
+  import (valid row with shared password, valid row with per-row password
+  override, no-login row, missing-name row → error, duplicate-phone row →
+  skipped) and an equivalent XLSX file parsed correctly; shared-password
+  login succeeded, per-row-override password succeeded and the shared
+  password correctly failed for that row; `grant-login` on an existing
+  no-login member (201) → duplicate grant-login (409) → grant-login with an
+  already-taken email (409); `reset-password` (200, confirmed new password
+  logs in) → on a no-login member (400); `colony-role` promote (addMember
+  path, 200) → repeat call on the same membership (updateMemberRole path,
+  200) → on a no-`user_id` member (400) → as a non-admin (403); bulk-import
+  with a bad `colony_id` (400), as a non-admin (403), with no file (400);
+  `change-password` wrong current password (401), correct change (204,
+  confirmed new password logs in). All 9 pre-existing tests in
+  `test/colonyMembership.test.js` still pass unchanged.
+  `docs/BACKEND_ANALYSIS.md` updated (§3 entities, §4 endpoint tables, §5
+  authorization, §7 error table) to describe these endpoints for the mobile
+  client, which treats that doc as authoritative.
 - **Optional colony-scoping for `members`** (see
   `plans/members-colony-scoping.md`): `migrations/010_members_colony_scoping.sql`
   adds a nullable `colony_id INTEGER REFERENCES colony(colony_id)` to `members`

@@ -1,0 +1,1 @@
+ALTER TABLE members ADD COLUMN user_id INTEGER UNIQUE REFERENCES users(user_id);
