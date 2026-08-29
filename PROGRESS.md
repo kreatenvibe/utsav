@@ -15,16 +15,61 @@ donations/expense_payments/expenses (soft) and tasks/availability (hard),
 JWT auth guards all write endpoints, colony-admin is now the only write role
 app-wide (see below — this closes the walk-in-donations/availability/donors
 scoping gap that was previously deferred here), the `members` table is
-gone (retired in favor of `users` + `colony_memberships`), and `email` is
+gone (retired in favor of `users` + `colony_memberships`), `email` is
 gone too — phone is now the sole login identifier and self-registration no
-longer exists (see below; this opens a real, flagged gap — there's no API
-path left to create the very first user in a fresh deployment). Next: not
-yet decided — open candidates are DELETE for
-colonies/festivals/donors/expected_donations (still deferred, cascade
-behavior not decided) and how the first-account-provisioning gap should
-actually be solved (seed script? ops runbook?). Ask user before picking.
+longer exists, and the first-account-provisioning gap that opened is now
+closed by `POST /auth/bootstrap` (see below). Next: not yet decided — open
+candidate is DELETE for colonies/festivals/donors/expected_donations (still
+deferred, cascade behavior not decided). Ask user before picking.
 
 ## Done
+- **`POST /auth/bootstrap`** (see `plans/bootstrap-first-user.md`): closes
+  the first-account-provisioning gap that migration 016 opened (flagged
+  across the last two sessions) — a fresh deployment no longer needs a
+  direct database insert to create its first `users` row. Public, no auth
+  (mounted on `/auth`, before the app-wide write gate, same as `/login`).
+  Body `{ name, phone, password }` — same three fields
+  `colonyMembershipService.upsertMembership` already requires to create a
+  brand-new account. 400 `"name, phone, and password are required"` if any
+  is missing.
+  **Only succeeds while `users` is completely empty**, checked and inserted
+  inside one transaction: `LOCK TABLE users IN EXCLUSIVE MODE` (chosen over
+  a row-level lock since there's nothing to lock a row on when the table has
+  zero rows — this is what actually makes two near-simultaneous calls safe:
+  the second blocks on the table lock until the first commits, then sees a
+  non-empty table) → `SELECT COUNT(*)` → 403 `"setup already completed"` if
+  non-zero → else insert and commit. New `services/authService.js` helper
+  `signToken` factored out of `loginUser` so `bootstrapFirstUser` reuses the
+  exact same JWT-signing logic rather than duplicating it.
+  Response `201`: `{ token }` — same shape and payload as `POST
+  /auth/login`, so the new account is logged straight in (confirmed with
+  user: the point is a mobile "first-run setup" screen can go straight from
+  setup into the app, no separate login step).
+  **Deliberately not a platform role**: the bootstrapped account is a plain
+  `users` row, no special flag — this app has no platform-admin concept.
+  It's simply positioned to be the one that calls `POST /colonies` and
+  becomes admin of whatever colony it creates; every account after it is
+  still onboarded the normal way (that colony's admin calling `POST
+  /colonies/:id/members`). Bootstrap never succeeds again once any account
+  exists, including the one it just created.
+  New test in `test/colonyMembership.test.js`: 400 on missing fields, 403
+  once a user exists (the shared test DB always has users by the time this
+  test runs — asserting the empty-table success path there would mean
+  truncating `users` in a DB other tests/developers share, which this suite
+  deliberately avoids). All 18 tests pass (17 pre-existing + 1 new).
+  **Success path verified manually instead**, against a throwaway database
+  in the same local docker Postgres container
+  (`utsav_bootstrap_check`, migrated fresh via `db/migrate.js`, dropped
+  after): missing-fields 400; first call 201 with a working token — used it
+  to log in again via `/auth/login` and to `POST /colonies` successfully
+  (confirming the bootstrapped account really can become a colony admin);
+  second call 403 `"setup already completed"`. `.env` swapped to the local
+  docker line for the regular test-suite run, then restored to the Render
+  line afterward — same swap-and-restore convention as every prior session.
+  `docs/BACKEND_ANALYSIS.md` updated beyond just §4/§5/§7 as requested — §1,
+  §3, §6, §11, §12 all had stale "no API path exists" / "provisioned outside
+  the API" language that would have misled a reader now that the gap is
+  closed, same reasoning as the migration-016 session's doc pass.
 - **Removed `email` entirely from the identity model — phone is now the sole
   login identifier, self-registration is gone** (database wipe confirmed
   safe by user — test/seed data only, so this is a destructive,

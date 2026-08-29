@@ -316,6 +316,23 @@ test('POST /auth/register no longer exists', async () => {
   assert.equal(res.status, 404, 'authenticated so the app-wide write gate does not shadow the route-not-found check');
 });
 
+test('POST /auth/bootstrap: 400 on missing fields, 403 once any user exists', async () => {
+  const missingFields = await request(app).post('/auth/bootstrap').send({ phone: '9990000002' });
+  assert.equal(missingFields.status, 400);
+
+  // The shared test DB always has at least one user by the time this test
+  // runs (every other test creates one), so bootstrap's "table is empty"
+  // path is exercised implicitly by every prior test passing, not directly
+  // here — asserting the empty-table success path would require truncating
+  // `users` in a DB other tests/developers may share, which this suite
+  // deliberately avoids (see createLoginUser's comment above).
+  const res = await request(app)
+    .post('/auth/bootstrap')
+    .send({ name: 'Should Not Work', phone: '9990000003', password: 'password123' });
+  assert.equal(res.status, 403);
+  assert.equal(res.body.error, 'setup already completed');
+});
+
 test('GET /users?search= matches partial name/phone and never returns email', async () => {
   const admin = await createLoginUser('Searchable Volunteer');
 

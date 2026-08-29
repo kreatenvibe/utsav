@@ -4,6 +4,12 @@ import { pool } from '../db/pool.js';
 
 const SALT_ROUNDS = 10;
 
+function signToken(user) {
+  return jwt.sign({ user_id: user.user_id, phone: user.phone }, process.env.JWT_SECRET, {
+    expiresIn: '7d',
+  });
+}
+
 export async function loginUser({ phone, password }) {
   if (!phone || !password) {
     const err = new Error('phone and password are required');
@@ -32,12 +38,47 @@ export async function loginUser({ phone, password }) {
     throw invalid();
   }
 
-  const token = jwt.sign(
-    { user_id: user.user_id, phone: user.phone },
-    process.env.JWT_SECRET,
-    { expiresIn: '7d' }
-  );
-  return { token };
+  return { token: signToken(user) };
+}
+
+// Creates the very first users row in a fresh deployment, now that
+// self-registration is gone and every other account is created by a colony
+// admin. Only succeeds while the users table is empty — the LOCK TABLE keeps
+// the count-then-insert atomic so two near-simultaneous calls can't both
+// pass the check and both insert.
+export async function bootstrapFirstUser({ name, phone, password }) {
+  if (!name || !phone || !password) {
+    const err = new Error('name, phone, and password are required');
+    err.status = 400;
+    throw err;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('LOCK TABLE users IN EXCLUSIVE MODE');
+
+    const { rows: countRows } = await client.query('SELECT COUNT(*) FROM users');
+    if (Number(countRows[0].count) > 0) {
+      const err = new Error('setup already completed');
+      err.status = 403;
+      throw err;
+    }
+
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+    const { rows } = await client.query(
+      'INSERT INTO users (name, phone, password_hash) VALUES ($1, $2, $3) RETURNING user_id, phone',
+      [name, phone, passwordHash]
+    );
+
+    await client.query('COMMIT');
+    return { token: signToken(rows[0]) };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function changePassword(userId, { current_password, new_password }) {

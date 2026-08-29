@@ -12,6 +12,14 @@ router.post('/login', async (req, res, next) => {
   }
 });
 
+router.post('/bootstrap', async (req, res, next) => {
+  try {
+    res.status(201).json(await authService.bootstrapFirstUser(req.body));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.patch('/change-password', requireAuth, async (req, res, next) => {
   try {
     await authService.changePassword(req.user.user_id, req.body);
