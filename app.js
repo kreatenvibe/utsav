@@ -5,7 +5,6 @@ import { requireAuth } from './middleware/auth.js';
 import { router as authRouter } from './routes/auth.js';
 import { router as coloniesRouter } from './routes/colonies.js';
 import { router as festivalsRouter } from './routes/festivals.js';
-import { router as membersRouter } from './routes/members.js';
 import { router as usersRouter } from './routes/users.js';
 import { router as donorsRouter } from './routes/donors.js';
 import { router as expectedDonationsRouter } from './routes/expectedDonations.js';
@@ -39,7 +38,6 @@ app.use((req, res, next) => {
 
 app.use('/colonies', coloniesRouter);
 app.use('/festivals', festivalsRouter);
-app.use('/members', membersRouter);
 app.use('/users', usersRouter);
 app.use('/donors', donorsRouter);
 app.use('/expected-donations', expectedDonationsRouter);

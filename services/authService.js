@@ -4,9 +4,9 @@ import { pool } from '../db/pool.js';
 
 const SALT_ROUNDS = 10;
 
-export async function registerUser({ email, password }) {
-  if (!email || !password) {
-    const err = new Error('email and password are required');
+export async function registerUser({ name, email, password }) {
+  if (!name || !email || !password) {
+    const err = new Error('name, email, and password are required');
     err.status = 400;
     throw err;
   }
@@ -15,8 +15,8 @@ export async function registerUser({ email, password }) {
 
   try {
     const { rows } = await pool.query(
-      'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING user_id, email',
-      [email, passwordHash]
+      'INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING user_id, name, email',
+      [name, email, passwordHash]
     );
     return rows[0];
   } catch (err) {

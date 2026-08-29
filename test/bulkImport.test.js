@@ -13,7 +13,7 @@ function uniqueEmail(label) {
 async function registerAndLogin(label) {
   const email = uniqueEmail(label);
   const password = 'password123';
-  const registerRes = await request(app).post('/auth/register').send({ email, password });
+  const registerRes = await request(app).post('/auth/register').send({ name: label, email, password });
   assert.equal(registerRes.status, 201);
   created.userIds.push(registerRes.body.user_id);
 
@@ -62,15 +62,15 @@ test('POST /colonies/:id/members/bulk: mixed created/skipped/error rows, admin-o
   const nonAdminAttempt = await request(app)
     .post(`/colonies/${colony.colony_id}/members/bulk`)
     .set('Authorization', `Bearer ${outsider.token}`)
-    .attach('file', Buffer.from('email,role\n'), 'roster.csv');
+    .attach('file', Buffer.from('name,email,role\n'), 'roster.csv');
   assert.equal(nonAdminAttempt.status, 403);
 
   const csv = [
-    'email,role',
-    `${newMember.email},member`,
-    `${alreadyMember.email},member`,
-    'nobody-registered@test.local,member',
-    `${outsider.email},not-a-role`,
+    'name,email,role,password',
+    `New Member Csv,${newMember.email},member,`,
+    `Already Member Csv,${alreadyMember.email},member,`,
+    `Nobody Registered,nobody-registered@test.local,member,`,
+    `Outsider Csv,${outsider.email},not-a-role,`,
   ].join('\n');
 
   const res = await request(app)
@@ -81,7 +81,8 @@ test('POST /colonies/:id/members/bulk: mixed created/skipped/error rows, admin-o
   assert.equal(res.status, 201);
   assert.equal(res.body.created.length, 1);
   assert.equal(res.body.created[0].row, 1);
-  assert.equal(res.body.created[0].email, undefined);
+  assert.equal(res.body.created[0].account, 'linked');
+  assert.equal(res.body.created[0].email, newMember.email);
   assert.equal(res.body.created[0].role, 'member');
   assert.ok(res.body.created[0].colony_membership_id);
 
@@ -91,6 +92,7 @@ test('POST /colonies/:id/members/bulk: mixed created/skipped/error rows, admin-o
 
   assert.equal(res.body.errors.length, 2);
   assert.equal(res.body.errors[0].row, 3);
+  assert.match(res.body.errors[0].reason, /password is required/);
   assert.equal(res.body.errors[1].row, 4);
   assert.match(res.body.errors[1].reason, /role must be/);
 
@@ -102,6 +104,7 @@ test('POST /colonies/:id/members/bulk: mixed created/skipped/error rows, admin-o
 
 test('POST /donors/bulk: creates rows with a name, errors on missing name, no dedup', async () => {
   const admin = await registerAndLogin('donor-bulk-admin');
+  await createColony(admin.token); // donor writes now require admin-of-any-colony
 
   const csv = ['name,phone', 'Anita Sharma,9990001111', ',9990002222', 'Anita Sharma,9990001111'].join('\n');
 

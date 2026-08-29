@@ -12,14 +12,145 @@
 All four numbered build-order layers have routes/services, plus
 `festival.current_balance` is derived, DELETE exists for
 donations/expense_payments/expenses (soft) and tasks/availability (hard),
-JWT auth guards all write endpoints, and colony membership/write-permission
-is now enforced (see below). Next: not yet decided — candidates are DELETE
-for colonies/festivals/members/donors/expected_donations (still deferred,
-cascade behavior not decided), or the deferred gaps flagged under colony
-membership below (walk-in donations, availability, self-leave). Ask user
-before picking.
+JWT auth guards all write endpoints, colony-admin is now the only write role
+app-wide (see below — this closes the walk-in-donations/availability/donors
+scoping gap that was previously deferred here), and the `members` table is
+gone (retired in favor of `users` + `colony_memberships`). Next: not yet
+decided — the remaining open candidate is DELETE for
+colonies/festivals/donors/expected_donations (still deferred, cascade
+behavior not decided). Ask user before picking.
 
 ## Done
+- **Retired `members`; unified all person-attribution on `users` +
+  `colony_memberships`; made colony-admin the only write role app-wide**
+  (design/decision doc at the Claude plan path `typed-sparking-fox.md`, not
+  copied into `plans/` in-repo for this one): three new migrations.
+  `migrations/013_users_name.sql` adds `users.name TEXT NOT NULL`, backfilled
+  on existing rows to `COALESCE(email, phone)` (decided over a
+  placeholder-and-prompt flow — simpler, needs no client change, and every
+  existing row already has at least one of email/phone thanks to migration
+  012's own CHECK). `migrations/014_backfill_member_logins.sql` is the
+  riskiest part: for every pre-existing `members` row that had no `user_id`
+  yet but *was* referenced by `task_assignments`/`availability` (about to
+  become `user_id NOT NULL`), it creates a placeholder `users` row via
+  `pgcrypto`'s `crypt(gen_random_uuid()::text, gen_salt('bf'))` — an unusable
+  random bcrypt-compatible password — keyed on the member's own `phone` if
+  present, else a synthesized `legacy-member-<id>@placeholder.invalid` email,
+  and links it into that member's colony (if `colony_id` was set). **These
+  accounts cannot be logged into until an admin runs the new**
+  `POST /colonies/:id/members/:userId/reset-password` — a one-time
+  operational follow-up, flagged here rather than solved silently. Known edge
+  case, deliberately left to fail loudly: two distinct members needing
+  backfill who share the same real phone number (across different colonies)
+  would collide on `users`' global phone uniqueness and roll back the whole
+  migration — resolution is manual (a DBA decides if they're the same
+  person) before re-running `npm run migrate`. `migrations/015_retire_members.sql`
+  then repoints `task_assignments.user_id`/`availability.user_id` (NOT NULL,
+  renamed from `member_id`) and `donations.collected_by`/`expense_payments.paid_by`
+  (nullable, attribution-only, unchanged semantics) at `users` instead of
+  `members`, backfilling via each member's `user_id`, and finally
+  `DROP TABLE members`. Verified row counts matched before/after and that the
+  `NOT NULL` on the first two didn't fire (meaning migration 014 caught every
+  referenced row).
+  **Endpoints removed entirely**: `POST /members`, `POST /members/bulk`,
+  `GET /members`, `GET /members/:id`, `PATCH /members/:id`,
+  `POST /members/:id/grant-login`, `POST /members/:id/reset-password`,
+  `PATCH /members/:id/colony-role` — `routes/members.js` and
+  `services/memberService.js` deleted outright.
+  **`POST /colonies/:id/members` is now create-or-link, not add-only**: body
+  becomes `{ name, email?, phone?, password?, role? }`, exactly one of
+  `email`/`phone` required (same exactly-one-of wording as `/auth/login`). An
+  identifier that already resolves to a `users` row is linked as-is
+  (`name`/`password` in the body are ignored, never mutating an existing
+  account as a side effect); one that doesn't resolve requires
+  `name`+`password` to create a fresh account. **No more 404** "no
+  registered user with that email" — this was the actual point of the
+  change, since login is now mandatory for every colony member and there
+  needed to be a single call that either finds or creates that login.
+  Response adds `name`/`email`/`phone`/`account` (`'created'`|`'linked'`) to
+  the existing `colony_membership_id, colony_id, user_id, role, created_at`
+  shape. `POST /colonies/:id/members/bulk` gained the same create-or-link
+  logic per row (file columns: `name` required per row even on a linking
+  row, `email`/`phone` exactly-one-of, `password` optional falling back to a
+  now-optional `initial_password` form field, `role` optional) — this
+  absorbs everything `POST /members/bulk` used to do; the old `grant_login`
+  column concept is gone entirely since granting a login is no longer
+  optional. New `POST /colonies/:id/members/:userId/reset-password`
+  (colony-admin of `:id` only, 404 if `:userId` isn't a member, no
+  current-password check) replaces the retired
+  `POST /members/:id/reset-password`. `GET /colonies/:id/members` response
+  gained `name`.
+  **`GET /users?search=` gained `name`** to both its response shape and its
+  match columns (`name` OR `email` OR `phone`) — it's exactly the "picker"
+  the `users.name` column was added for.
+  **`POST /auth/register` now requires `name`** alongside `email`/`password`
+  (400 if missing) — users no longer have "no display name at all."
+  **`task_assignments`/`availability` now key on `user_id`**
+  (`{ task_id, user_id }` / `{ user_id, date, is_available }`), and both now
+  inline the linked user's display info on every GET
+  (`user: { name, email, phone }`) — matches the existing precedent of
+  inlining computed fields (`total_donated`, `current_balance`, etc.) rather
+  than making the client do a lookup per row. `donations`/`expense_payments`
+  inline `collector`/`payer: { user_id, name, email, phone } | null` the
+  same way, alongside the raw `collected_by`/`paid_by` id.
+  **Authorization — colony-admin is now the only write role, app-wide.**
+  Every `assertColonyMember` call across `festivalService`,
+  `expectedDonationService`, `expenseService`, `taskService`,
+  `taskAssignmentService` became `assertColonyAdmin` — a plain colony member
+  can read everything but write nothing beyond what they already could as
+  any authenticated user. `assertColonyMember`/`isColonyMember` had no
+  remaining callers afterward and were deleted rather than left as dead
+  exports.
+  **Resolved the open question** (donors / walk-in donations / availability
+  were flagged unscoped across three prior sessions): extended the
+  admin-only rule to all three, via a new `assertAdminOfAnyColony(userId)`
+  gate (true if `role = 'admin'` on *any* `colony_memberships` row) since
+  none of them has an FK path to a specific colony. Chosen because the task
+  was explicitly "colony-admin the only write role **app-wide**" — leaving
+  these three as the sole remaining exceptions would have reproduced the
+  exact inconsistency being fixed. Mobile consequence: the Donors screens
+  and Walk-in Donation screen need a "current user is admin of ≥1 colony"
+  gate, derivable from `GET /colonies/mine` (any `role: "admin"` row) — no
+  new endpoint needed.
+  **Also resolved, flagged as a real product change, not silently decided**:
+  `task_assignments` create/delete now require colony-admin too, same as
+  everything else in the app-wide list — meaning **signing up for a task is
+  no longer self-service**. An ordinary colony member can no longer add
+  themselves to a task; only an admin enrolls volunteers now. Same for
+  `availability` (admin-of-any-colony gate) — a plain member can no longer
+  record their own yes/no; only an admin can, on anyone's behalf.
+  Updated all three test files for the new shapes/gates
+  (`test/colonyMembership.test.js`, `test/usersPhoneLogin.test.js` —
+  rewritten around the new create-or-link bulk endpoint instead of the
+  retired `/members/bulk`, including a new case confirming the same phone in
+  a second colony now *links* the existing account instead of erroring,
+  `test/bulkImport.test.js`). Fixed one real bug surfaced by the new tests:
+  `routes/colonies.js`'s bulk-add handler read `req.body.initial_password`
+  unconditionally, which threw (500, not 400) on a request with no body at
+  all (e.g. the "missing file" test) — fixed with `req.body?.`. All 16 tests
+  pass. Manually verified against the local docker Postgres + running
+  server (`.env` swapped, `npm run migrate` applied 013–015 cleanly,
+  `npm test`, then a manual pass): colony-member add by phone (new
+  account), `GET /colonies/:id/members` showing `name`, admin
+  reset-password followed by a successful login with the new password, a
+  non-admin blocked (403 "you must be an admin of at least one colony to do
+  that") from creating their own availability while the admin succeeded
+  with the denormalized `user` object inlined — `.env` restored to the
+  Render line afterward.
+  `docs/BACKEND_ANALYSIS.md` updated throughout: §1 (domain list/roles/
+  relationship diagram), §3 (dropped the `members` entity, updated
+  `users`/`colony_memberships`/`donations`/`expense_payments`/
+  `task_assignments`/`availability`, resolved the old "explicitly out of
+  scope" section), §4 (every endpoint table/body touched above), §5 (the
+  app-wide admin-only rule, the any-colony-admin gate, the task-assignment
+  self-service change, replacing the retired member-login-granting
+  section), §6 (bootstrap/task workflow wording), §7 (new error rows for
+  create-or-link validation and the any-colony-admin 403, removed the
+  retired grant-login/duplicate-phone rows), §8 (rewrote the Volunteer
+  Roster screen as "Volunteer Directory," updated Colony Detail/Festival
+  Dashboard/Donors/Pledges/Task Board actions), §9/§10/§11/§12 (resolved
+  the long-flagged scoping question, removed now-stale "members" mentions,
+  added the placeholder-account follow-up as a new observation/unknown).
 - **Phone-based login + bulk-import colony auto-link** (see
   `plans/users-phone-login.md`): `migrations/012_users_phone_login.sql` makes
   `users.email` nullable, adds a nullable `users.phone TEXT` with a **partial**

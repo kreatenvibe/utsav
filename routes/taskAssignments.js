@@ -13,8 +13,8 @@ router.post('/', async (req, res, next) => {
 
 router.get('/', async (req, res, next) => {
   try {
-    const { task_id, member_id } = req.query;
-    res.json(await taskAssignmentService.listTaskAssignments({ task_id, member_id }));
+    const { task_id, user_id } = req.query;
+    res.json(await taskAssignmentService.listTaskAssignments({ task_id, user_id }));
   } catch (err) {
     next(err);
   }

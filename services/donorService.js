@@ -1,7 +1,9 @@
 import { pool } from '../db/pool.js';
 import { parseRoster } from './rosterParser.js';
+import { assertAdminOfAnyColony } from './colonyMembershipService.js';
 
-export async function createDonor({ name, phone }) {
+export async function createDonor({ name, phone }, actingUserId) {
+  await assertAdminOfAnyColony(actingUserId);
   if (!name) {
     const err = new Error('name is required');
     err.status = 400;
@@ -36,7 +38,8 @@ export async function getDonor(id) {
   return rows[0];
 }
 
-export async function bulkImportDonors(file) {
+export async function bulkImportDonors(file, actingUserId) {
+  await assertAdminOfAnyColony(actingUserId);
   if (!file) {
     const err = new Error('file is required');
     err.status = 400;
@@ -74,7 +77,8 @@ export async function bulkImportDonors(file) {
   return { created, skipped, errors };
 }
 
-export async function updateDonor(id, { name, phone }) {
+export async function updateDonor(id, { name, phone }, actingUserId) {
+  await assertAdminOfAnyColony(actingUserId);
   await getDonor(id);
   const { rows } = await pool.query(
     `UPDATE donors SET

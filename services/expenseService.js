@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { colonyIdForFestival, assertColonyMember } from './colonyMembershipService.js';
+import { colonyIdForFestival, assertColonyAdmin } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
@@ -18,7 +18,7 @@ export async function createExpense({ festival_id, purpose, vendor_name, amount_
   }
   const colonyId = await colonyIdForFestival(festival_id);
   if (colonyId !== null) {
-    await assertColonyMember(actingUserId, colonyId);
+    await assertColonyAdmin(actingUserId, colonyId);
   }
   try {
     const { rows } = await pool.query(
@@ -69,14 +69,14 @@ export async function getExpense(id) {
 export async function deleteExpense(id, actingUserId) {
   const existing = await getExpense(id);
   const colonyId = await colonyIdForFestival(existing.festival_id);
-  await assertColonyMember(actingUserId, colonyId);
+  await assertColonyAdmin(actingUserId, colonyId);
   await pool.query('UPDATE expenses SET deleted_at = now() WHERE expense_id = $1', [id]);
 }
 
 export async function updateExpense(id, { purpose, vendor_name, amount_planned, status }, actingUserId) {
   const existing = await getExpense(id);
   const colonyId = await colonyIdForFestival(existing.festival_id);
-  await assertColonyMember(actingUserId, colonyId);
+  await assertColonyAdmin(actingUserId, colonyId);
   if (status && !['open', 'settled'].includes(status)) {
     const err = new Error("status must be 'open' or 'settled'");
     err.status = 400;

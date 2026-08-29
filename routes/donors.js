@@ -8,7 +8,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 
 router.post('/', async (req, res, next) => {
   try {
-    res.status(201).json(await donorService.createDonor(req.body));
+    res.status(201).json(await donorService.createDonor(req.body, req.user.user_id));
   } catch (err) {
     next(err);
   }
@@ -27,7 +27,7 @@ router.post(
   },
   async (req, res, next) => {
     try {
-      res.status(201).json(await donorService.bulkImportDonors(req.file));
+      res.status(201).json(await donorService.bulkImportDonors(req.file, req.user.user_id));
     } catch (err) {
       next(err);
     }
@@ -52,7 +52,7 @@ router.get('/:id', async (req, res, next) => {
 
 router.patch('/:id', async (req, res, next) => {
   try {
-    res.json(await donorService.updateDonor(req.params.id, req.body));
+    res.json(await donorService.updateDonor(req.params.id, req.body, req.user.user_id));
   } catch (err) {
     next(err);
   }

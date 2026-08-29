@@ -1,7 +1,9 @@
+import bcrypt from 'bcryptjs';
 import { pool } from '../db/pool.js';
 import { parseRoster } from './rosterParser.js';
 
 const UNIQUE_VIOLATION = '23505';
+const SALT_ROUNDS = 10;
 
 function forbidden(message) {
   const err = new Error(message);
@@ -14,14 +16,6 @@ export async function colonyExists(colonyId) {
   return rows.length > 0;
 }
 
-export async function isColonyMember(userId, colonyId) {
-  const { rows } = await pool.query(
-    'SELECT 1 FROM colony_memberships WHERE colony_id = $1 AND user_id = $2',
-    [colonyId, userId]
-  );
-  return rows.length > 0;
-}
-
 export async function isColonyAdmin(userId, colonyId) {
   const { rows } = await pool.query(
     "SELECT 1 FROM colony_memberships WHERE colony_id = $1 AND user_id = $2 AND role = 'admin'",
@@ -30,15 +24,23 @@ export async function isColonyAdmin(userId, colonyId) {
   return rows.length > 0;
 }
 
-export async function assertColonyMember(userId, colonyId) {
-  if (!(await isColonyMember(userId, colonyId))) {
-    throw forbidden('you are not a member of this colony');
-  }
-}
-
 export async function assertColonyAdmin(userId, colonyId) {
   if (!(await isColonyAdmin(userId, colonyId))) {
     throw forbidden('you must be an admin of this colony to do that');
+  }
+}
+
+export async function isAdminOfAnyColony(userId) {
+  const { rows } = await pool.query(
+    "SELECT 1 FROM colony_memberships WHERE user_id = $1 AND role = 'admin' LIMIT 1",
+    [userId]
+  );
+  return rows.length > 0;
+}
+
+export async function assertAdminOfAnyColony(userId) {
+  if (!(await isAdminOfAnyColony(userId))) {
+    throw forbidden('you must be an admin of at least one colony to do that');
   }
 }
 
@@ -91,7 +93,7 @@ export async function listMyColonies(userId) {
 
 export async function listColonyMembers(colonyId) {
   const { rows } = await pool.query(
-    `SELECT cm.colony_membership_id, cm.user_id, u.email, cm.role, cm.created_at
+    `SELECT cm.colony_membership_id, cm.user_id, u.name, u.email, u.phone, cm.role, cm.created_at
      FROM colony_memberships cm
      JOIN users u ON u.user_id = cm.user_id
      WHERE cm.colony_id = $1
@@ -113,10 +115,18 @@ async function isSoleAdmin(colonyId, userId) {
 
 // Shared by addMember (single) and bulkAddMembers (per-row) — caller is
 // responsible for the assertColonyAdmin check, done once per request rather
-// than once per row for bulk.
-async function insertMembership(colonyId, { email, role = 'member' }) {
-  if (!email) {
-    const err = new Error('email is required');
+// than once per row for bulk. Create-or-link: an identifier that already
+// resolves to a users row is linked as-is (name/password ignored, never
+// mutating an existing account as a side effect); one that doesn't resolve
+// requires name+password to create a fresh account.
+export async function upsertMembership(colonyId, { name, email, phone, password, role = 'member' }) {
+  if (email && phone) {
+    const err = new Error('provide either email or phone, not both');
+    err.status = 400;
+    throw err;
+  }
+  if (!email && !phone) {
+    const err = new Error('email or phone is required');
     err.status = 400;
     throw err;
   }
@@ -125,19 +135,46 @@ async function insertMembership(colonyId, { email, role = 'member' }) {
     err.status = 400;
     throw err;
   }
-  const { rows: userRows } = await pool.query('SELECT user_id FROM users WHERE email = $1', [email]);
-  if (!userRows[0]) {
-    const err = new Error('no registered user with that email');
-    err.status = 404;
-    throw err;
+
+  const column = email ? 'email' : 'phone';
+  const identifier = email || phone;
+  const { rows: existingRows } = await pool.query(
+    `SELECT user_id, name, email, phone FROM users WHERE ${column} = $1`,
+    [identifier]
+  );
+
+  let user = existingRows[0];
+  let account;
+
+  if (user) {
+    account = 'linked';
+  } else {
+    if (!name) {
+      const err = new Error('name is required to create a new account');
+      err.status = 400;
+      throw err;
+    }
+    if (!password) {
+      const err = new Error('password is required to create a new account');
+      err.status = 400;
+      throw err;
+    }
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+    const { rows } = await pool.query(
+      'INSERT INTO users (name, email, phone, password_hash) VALUES ($1, $2, $3, $4) RETURNING user_id, name, email, phone',
+      [name, email ?? null, phone ?? null, passwordHash]
+    );
+    user = rows[0];
+    account = 'created';
   }
+
   try {
     const { rows } = await pool.query(
       `INSERT INTO colony_memberships (colony_id, user_id, role)
        VALUES ($1, $2, $3) RETURNING colony_membership_id, colony_id, user_id, role, created_at`,
-      [colonyId, userRows[0].user_id, role]
+      [colonyId, user.user_id, role]
     );
-    return rows[0];
+    return { ...rows[0], name: user.name, email: user.email, phone: user.phone, account };
   } catch (err) {
     if (err.code === UNIQUE_VIOLATION) {
       const e = new Error('that user is already a member of this colony');
@@ -148,12 +185,12 @@ async function insertMembership(colonyId, { email, role = 'member' }) {
   }
 }
 
-export async function addMember(colonyId, actingUserId, { email, role = 'member' }) {
+export async function addMember(colonyId, actingUserId, body) {
   await assertColonyAdmin(actingUserId, colonyId);
-  return insertMembership(colonyId, { email, role });
+  return upsertMembership(colonyId, body);
 }
 
-export async function bulkAddMembers(colonyId, actingUserId, file) {
+export async function bulkAddMembers(colonyId, actingUserId, { file, initial_password } = {}) {
   if (!file) {
     const err = new Error('file is required');
     err.status = 400;
@@ -170,22 +207,51 @@ export async function bulkAddMembers(colonyId, actingUserId, file) {
   for (let i = 0; i < rows.length; i++) {
     const rowNumber = i + 1;
     const row = rows[i];
+    const name = row.name?.trim() || null;
     const email = row.email?.trim() || null;
+    const phone = row.phone?.trim() || null;
+    const password = row.password?.trim() || initial_password?.trim() || null;
     const role = row.role?.trim() || 'member';
 
+    if (!name) {
+      errors.push({ row: rowNumber, email, phone, reason: 'name is required' });
+      continue;
+    }
+
     try {
-      const membership = await insertMembership(colonyId, { email, role });
+      const membership = await upsertMembership(colonyId, { name, email, phone, password, role });
       created.push({ row: rowNumber, ...membership });
     } catch (err) {
       if (err.status === 409) {
-        skipped.push({ row: rowNumber, email, reason: err.message });
+        skipped.push({ row: rowNumber, email, phone, reason: err.message });
       } else {
-        errors.push({ row: rowNumber, email, reason: err.message });
+        errors.push({ row: rowNumber, email, phone, reason: err.message });
       }
     }
   }
 
   return { created, skipped, errors };
+}
+
+export async function resetMemberPassword(colonyId, actingUserId, targetUserId, { password }) {
+  await assertColonyAdmin(actingUserId, colonyId);
+  if (!password) {
+    const err = new Error('password is required');
+    err.status = 400;
+    throw err;
+  }
+  const { rows } = await pool.query(
+    'SELECT 1 FROM colony_memberships WHERE colony_id = $1 AND user_id = $2',
+    [colonyId, targetUserId]
+  );
+  if (!rows[0]) {
+    const err = new Error('membership not found');
+    err.status = 404;
+    throw err;
+  }
+  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  await pool.query('UPDATE users SET password_hash = $2 WHERE user_id = $1', [targetUserId, passwordHash]);
+  return { user_id: Number(targetUserId) };
 }
 
 export async function updateMemberRole(colonyId, actingUserId, targetUserId, role) {

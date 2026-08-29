@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { colonyIdForFestival, assertColonyMember } from './colonyMembershipService.js';
+import { colonyIdForFestival, assertColonyAdmin } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
@@ -18,7 +18,7 @@ export async function createExpectedDonation({ donor_id, festival_id, expected_a
   }
   const colonyId = await colonyIdForFestival(festival_id);
   if (colonyId !== null) {
-    await assertColonyMember(actingUserId, colonyId);
+    await assertColonyAdmin(actingUserId, colonyId);
   }
   try {
     const { rows } = await pool.query(
@@ -73,7 +73,7 @@ export async function getExpectedDonation(id) {
 export async function updateExpectedDonation(id, { expected_amount, year, purpose, status }, actingUserId) {
   const existing = await getExpectedDonation(id);
   const colonyId = await colonyIdForFestival(existing.festival_id);
-  await assertColonyMember(actingUserId, colonyId);
+  await assertColonyAdmin(actingUserId, colonyId);
   if (status && !['open', 'closed'].includes(status)) {
     const err = new Error("status must be 'open' or 'closed'");
     err.status = 400;

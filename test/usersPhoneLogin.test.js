@@ -4,7 +4,7 @@ import request from 'supertest';
 import { app } from '../app.js';
 import { pool } from '../db/pool.js';
 
-const created = { userIds: [], colonyIds: [], memberIds: [] };
+const created = { userIds: [], colonyIds: [] };
 
 function uniqueEmail(label) {
   return `${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@test.local`;
@@ -17,7 +17,7 @@ function uniquePhone() {
 async function registerAndLogin(label) {
   const email = uniqueEmail(label);
   const password = 'password123';
-  const registerRes = await request(app).post('/auth/register').send({ email, password });
+  const registerRes = await request(app).post('/auth/register').send({ name: label, email, password });
   assert.equal(registerRes.status, 201);
   created.userIds.push(registerRes.body.user_id);
 
@@ -37,9 +37,6 @@ async function createColony(token) {
 }
 
 after(async () => {
-  if (created.memberIds.length) {
-    await pool.query('DELETE FROM members WHERE member_id = ANY($1)', [created.memberIds]);
-  }
   if (created.colonyIds.length) {
     await pool.query('DELETE FROM colony_memberships WHERE colony_id = ANY($1)', [created.colonyIds]);
     await pool.query('DELETE FROM colony WHERE colony_id = ANY($1)', [created.colonyIds]);
@@ -50,27 +47,26 @@ after(async () => {
   await pool.end();
 });
 
-test('POST /auth/login: phone-only login succeeds, wrong password fails', async () => {
+test('POST /colonies/:id/members/bulk: phone-only row creates a login, and it works at /auth/login', async () => {
   const admin = await registerAndLogin('phone-login-admin');
   const colony = await createColony(admin.token);
   const phone = uniquePhone();
 
-  const csv = ['name,phone,grant_login,password', `Volunteer One,${phone},yes,secret123`].join('\n');
+  const csv = ['name,phone,password', `Volunteer One,${phone},secret123`].join('\n');
   const bulkRes = await request(app)
-    .post('/members/bulk')
+    .post(`/colonies/${colony.colony_id}/members/bulk`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .field('colony_id', colony.colony_id)
-    .field('initial_password', 'shared123')
     .attach('file', Buffer.from(csv), 'roster.csv');
   assert.equal(bulkRes.status, 201);
   assert.equal(bulkRes.body.created.length, 1);
-  assert.equal(bulkRes.body.created[0].login_granted, true);
-  created.memberIds.push(bulkRes.body.created[0].member_id);
+  assert.equal(bulkRes.body.created[0].account, 'created');
+  created.userIds.push(bulkRes.body.created[0].user_id);
 
-  const { rows } = await pool.query('SELECT user_id FROM members WHERE member_id = $1', [
-    bulkRes.body.created[0].member_id,
-  ]);
-  created.userIds.push(rows[0].user_id);
+  const { rows: membershipRows } = await pool.query(
+    'SELECT role FROM colony_memberships WHERE colony_id = $1 AND user_id = $2',
+    [colony.colony_id, bulkRes.body.created[0].user_id]
+  );
+  assert.equal(membershipRows.length, 1, 'a bulk-added member is always given a colony membership (login is mandatory now)');
 
   const loginRes = await request(app).post('/auth/login').send({ phone, password: 'secret123' });
   assert.equal(loginRes.status, 200);
@@ -91,105 +87,71 @@ test('POST /auth/login: both email and phone is 400, neither is 400', async () =
   assert.equal(neitherRes.status, 400);
 });
 
-test('POST /members/bulk: email path unchanged and now auto-links colony membership', async () => {
+test('POST /colonies/:id/members/bulk: email-column row creates an account and links it to the colony', async () => {
   const admin = await registerAndLogin('bulk-email-admin');
   const colony = await createColony(admin.token);
   const email = uniqueEmail('bulk-email-row');
-  const phone = uniquePhone();
 
-  const csv = ['name,phone,email', `Email Volunteer,${phone},${email}`].join('\n');
+  const csv = ['name,email,password', `Email Volunteer,${email},secret123`].join('\n');
   const res = await request(app)
-    .post('/members/bulk')
+    .post(`/colonies/${colony.colony_id}/members/bulk`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .field('colony_id', colony.colony_id)
-    .field('initial_password', 'shared123')
     .attach('file', Buffer.from(csv), 'roster.csv');
 
   assert.equal(res.status, 201);
   assert.equal(res.body.created.length, 1);
-  assert.equal(res.body.created[0].login_granted, true);
+  assert.equal(res.body.created[0].account, 'created');
   assert.equal(res.body.created[0].email, email);
-  created.memberIds.push(res.body.created[0].member_id);
-
-  const { rows: memberRows } = await pool.query('SELECT user_id FROM members WHERE member_id = $1', [
-    res.body.created[0].member_id,
-  ]);
-  const userId = memberRows[0].user_id;
-  created.userIds.push(userId);
+  created.userIds.push(res.body.created[0].user_id);
 
   const { rows: membershipRows } = await pool.query(
     'SELECT role FROM colony_memberships WHERE colony_id = $1 AND user_id = $2',
-    [colony.colony_id, userId]
+    [colony.colony_id, res.body.created[0].user_id]
   );
-  assert.equal(membershipRows.length, 1, 'email-granted login should be auto-added to the colony');
+  assert.equal(membershipRows.length, 1);
   assert.equal(membershipRows[0].role, 'member');
 });
 
-test('POST /members/bulk: grant_login=false with no email grants no login (unchanged volunteer case)', async () => {
-  const admin = await registerAndLogin('bulk-novolunteer-admin');
-  const colony = await createColony(admin.token);
-  const phone = uniquePhone();
-
-  const csv = ['name,phone,grant_login', `No Login Volunteer,${phone},no`].join('\n');
-  const res = await request(app)
-    .post('/members/bulk')
-    .set('Authorization', `Bearer ${admin.token}`)
-    .field('colony_id', colony.colony_id)
-    .field('initial_password', 'shared123')
-    .attach('file', Buffer.from(csv), 'roster.csv');
-
-  assert.equal(res.status, 201);
-  assert.equal(res.body.created.length, 1);
-  assert.equal(res.body.created[0].login_granted, false);
-  created.memberIds.push(res.body.created[0].member_id);
-});
-
-test('POST /members/bulk: phone already registered for login surfaces as a row-level error (cross-colony)', async () => {
-  // members.phone uniqueness is scoped per-colony (migration 010), but users.phone
-  // is globally unique — so this case only shows up across two different colonies'
-  // rosters, not a same-colony duplicate (that hits the members-level check first
-  // and lands in `skipped`, covered by the mixed-outcome bulk-import behavior already).
-  const admin = await registerAndLogin('bulk-dupphone-admin');
+test('POST /colonies/:id/members/bulk: same phone in a second colony links the existing account instead of erroring', async () => {
+  // users.phone is globally unique, so a second bulk-add row with the same phone can no
+  // longer create a second account (migration 012 behavior) — the new create-or-link
+  // upsert instead recognizes the existing account and just adds a membership row for
+  // the new colony, which is the more useful behavior for someone who belongs to two
+  // colonies.
+  const admin = await registerAndLogin('bulk-samephone-admin');
   const colonyA = await createColony(admin.token);
   const colonyB = await createColony(admin.token);
   const phone = uniquePhone();
 
-  const firstCsv = ['name,phone,grant_login', `First Volunteer,${phone},yes`].join('\n');
+  const firstCsv = ['name,phone,password', `Shared Volunteer,${phone},secret123`].join('\n');
   const firstRes = await request(app)
-    .post('/members/bulk')
+    .post(`/colonies/${colonyA.colony_id}/members/bulk`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .field('colony_id', colonyA.colony_id)
-    .field('initial_password', 'shared123')
     .attach('file', Buffer.from(firstCsv), 'roster.csv');
   assert.equal(firstRes.status, 201);
-  assert.equal(firstRes.body.created[0].login_granted, true);
-  created.memberIds.push(firstRes.body.created[0].member_id);
-  const { rows } = await pool.query('SELECT user_id FROM members WHERE member_id = $1', [
-    firstRes.body.created[0].member_id,
-  ]);
-  created.userIds.push(rows[0].user_id);
+  assert.equal(firstRes.body.created[0].account, 'created');
+  const userId = firstRes.body.created[0].user_id;
+  created.userIds.push(userId);
 
-  const secondCsv = ['name,phone,grant_login', `Second Volunteer,${phone},yes`].join('\n');
+  const secondCsv = ['name,phone', `Shared Volunteer,${phone}`].join('\n');
   const secondRes = await request(app)
-    .post('/members/bulk')
+    .post(`/colonies/${colonyB.colony_id}/members/bulk`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .field('colony_id', colonyB.colony_id)
-    .field('initial_password', 'shared123')
     .attach('file', Buffer.from(secondCsv), 'roster.csv');
 
   assert.equal(secondRes.status, 201);
-  assert.equal(secondRes.body.created.length, 0);
-  assert.equal(secondRes.body.skipped.length, 0);
-  assert.equal(secondRes.body.errors.length, 1);
-  assert.match(secondRes.body.errors[0].reason, /phone already registered for login/);
+  assert.equal(secondRes.body.created.length, 1);
+  assert.equal(secondRes.body.created[0].account, 'linked');
+  assert.equal(secondRes.body.created[0].user_id, userId);
 
-  // member-insert + login-grant are atomic together (same convention as the
-  // email-duplicate case), so the failed login grant rolls back the member row too.
-  const { rows: memberRows } = await pool.query(
-    'SELECT member_id FROM members WHERE colony_id = $1 AND phone = $2',
-    [colonyB.colony_id, phone]
+  const { rows: membershipRows } = await pool.query(
+    'SELECT colony_id FROM colony_memberships WHERE user_id = $1 ORDER BY colony_id',
+    [userId]
   );
-  assert.equal(memberRows.length, 0, 'member insert is rolled back together with the failed login grant');
+  assert.deepEqual(
+    membershipRows.map((r) => r.colony_id).sort((a, b) => a - b),
+    [colonyA.colony_id, colonyB.colony_id].sort((a, b) => a - b)
+  );
 });
 
 test('GET /users?search= matches partial phone', async () => {
@@ -197,19 +159,13 @@ test('GET /users?search= matches partial phone', async () => {
   const colony = await createColony(admin.token);
   const phone = uniquePhone();
 
-  const csv = ['name,phone,grant_login,password', `Searchable Volunteer,${phone},yes,secret123`].join('\n');
+  const csv = ['name,phone,password', `Searchable Volunteer,${phone},secret123`].join('\n');
   const bulkRes = await request(app)
-    .post('/members/bulk')
+    .post(`/colonies/${colony.colony_id}/members/bulk`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .field('colony_id', colony.colony_id)
-    .field('initial_password', 'shared123')
     .attach('file', Buffer.from(csv), 'roster.csv');
   assert.equal(bulkRes.status, 201);
-  created.memberIds.push(bulkRes.body.created[0].member_id);
-  const { rows } = await pool.query('SELECT user_id FROM members WHERE member_id = $1', [
-    bulkRes.body.created[0].member_id,
-  ]);
-  created.userIds.push(rows[0].user_id);
+  created.userIds.push(bulkRes.body.created[0].user_id);
 
   const searchRes = await request(app)
     .get(`/users?search=${phone.slice(-6)}`)
@@ -218,4 +174,5 @@ test('GET /users?search= matches partial phone', async () => {
   const match = searchRes.body.find((u) => u.phone === phone);
   assert.ok(match, 'search by partial phone should find the phone-only user');
   assert.equal(match.email, null);
+  assert.equal(match.name, 'Searchable Volunteer');
 });

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Festival Management API",
-    "description": "Backend API for the community festival management app (donations, expenses, tasks, volunteers, multi-colony support). Almost all GET routes are public; every POST/PUT/PATCH/DELETE route requires a JWT via `Authorization: Bearer {{token}}` (see the Auth folder to obtain one).\n\nColonies now have a membership model (see the Colonies folder): creating a colony makes you its first admin, and writes to anything scoped under a colony (its festivals, expected donations, donations tied to an expectation, expenses, expense payments, tasks, task assignments) require the caller to be a member of that colony — a 403 otherwise. `GET /colonies/mine` and `GET /colonies/:id/members` are the only two GETs in this whole API that require a token, since they expose identity/email data. Managing membership itself (add/change-role/remove) requires being an ADMIN of the colony, not just a member. Walk-in donations (no `expected_id`), `availability`, `members` (volunteers), and `donors` are NOT colony-scoped — they have no colony/festival link in the schema, so any authenticated user can still write them.\n\nSet the `baseUrl` and `token` collection variables before running requests. For the membership endpoints below, also set `memberUserId` (the target user's numeric id) and `memberEmail` (their registered email) — register a second user via Auth > Register first if you want to test these end-to-end.",
+    "description": "Backend API for the community festival management app (donations, expenses, tasks, volunteers, multi-colony support). Almost all GET routes are public; every POST/PUT/PATCH/DELETE route requires a JWT via `Authorization: Bearer {{token}}` (see the Auth folder to obtain one).\n\nColonies have a membership model (see the Colonies folder): creating a colony makes you its first admin, and writes to anything scoped under a colony (its festivals, expected donations, donations tied to an expectation, expenses, expense payments, tasks, task assignments) require the caller to be a member of that colony — a 403 otherwise. `GET /colonies/mine`, `GET /colonies/:id/members`, and `GET /users` are the only GETs in this whole API that require a token, since they expose identity/email/phone data. Managing membership itself (add/change-role/remove) requires being an ADMIN of the colony, not just a member. Walk-in donations (no `expected_id`) and `availability` are NOT colony-scoped. `members` and `donors` are optionally colony-scoped: a `members` row created with a `colony_id` requires colony-admin and lives in that colony's private roster; omit `colony_id` and it behaves as a global, unscoped row same as `donors` always are.\n\nLogin identities: `users.email` and `users.phone` are each individually optional (at least one is required) — a self-registered user always has `email` (there is no phone-based self-registration), while a bulk-imported volunteer may have only `phone`. `POST /auth/login` takes exactly one of `email`/`phone` plus `password` — sending both, or neither, is a 400.\n\nSet the `baseUrl` and `token` collection variables before running requests. For the colony-membership and member-login endpoints below, also set `memberUserId` (the target user's numeric id), `memberEmail`, and `memberPhone` — register a second user or bulk-import a member first if you want to test these end-to-end.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "f3f1a6b0-6b1a-4b1a-9c1a-festivalmgmtapi"
   },
@@ -20,7 +20,9 @@
     { "key": "taskAssignmentId", "value": "1", "type": "string" },
     { "key": "availabilityId", "value": "1", "type": "string" },
     { "key": "memberUserId", "value": "2", "type": "string" },
-    { "key": "memberEmail", "value": "rohit.deshmukh@example.com", "type": "string" }
+    { "key": "memberEmail", "value": "rohit.deshmukh@example.com", "type": "string" },
+    { "key": "memberPhone", "value": "9876543210", "type": "string" },
+    { "key": "initialPassword", "value": "ChangeMe123!", "type": "string" }
   ],
   "item": [
     {
@@ -41,11 +43,11 @@
               "host": ["{{baseUrl}}"],
               "path": ["auth", "register"]
             },
-            "description": "Creates a new user. No auth required. Registering alone grants no write access anywhere — a user can only write to a colony's data once they're a member of it (see Colonies > Create Colony, which auto-admins the creator, and Colonies > Add Colony Member for adding others). Returns 201 with `{ user_id, email }` (password hash never included). Duplicate email returns 409."
+            "description": "Creates a new user. No auth required. Email+password only — there is no phone-based self-registration; a phone-only login can only be created via Members > Bulk Import Members. Registering alone grants no write access anywhere — a user can only write to a colony's data once they're a member of it (see Colonies > Create Colony, which auto-admins the creator, and Colonies > Add Colony Member for adding others). Returns 201 with `{ user_id, email }` (password hash never included). Duplicate email returns 409."
           }
         },
         {
-          "name": "Login",
+          "name": "Login (Email)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -58,7 +60,68 @@
               "host": ["{{baseUrl}}"],
               "path": ["auth", "login"]
             },
-            "description": "No auth required. Returns `{ token }` — a JWT valid for 7 days. Copy the token into the collection-level `token` variable so all other requests pick it up automatically. Wrong password and unknown email both return 401 with the same message (login intentionally doesn't leak which emails are registered)."
+            "description": "No auth required. Send exactly one of `email` or `phone` plus `password` — see Login (Phone) for the other form. 400 if `password` is missing or if neither identifier is given; 400 if BOTH `email` and `phone` are given (ambiguous, rejected on purpose). Returns `{ token }` — a JWT valid for 7 days. Copy the token into the collection-level `token` variable so all other requests pick it up automatically. Wrong password and unknown identifier both return 401 with the same message (login intentionally doesn't leak which emails/phones are registered)."
+          }
+        },
+        {
+          "name": "Login (Phone)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{memberPhone}}\",\n  \"password\": \"{{initialPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Same endpoint and rules as Login (Email), using `phone` instead of `email`. Only accounts created with a `phone` (currently only via Members > Bulk Import Members with `grant_login` set) can log in this way — a plain email/password account has no `phone` set and 401s here."
+          }
+        },
+        {
+          "name": "Change Password",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"current_password\": \"SecurePass123!\",\n  \"new_password\": \"EvenMoreSecure456!\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/change-password",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "change-password"]
+            },
+            "description": "Requires auth. Self-service password change for the caller's own account — independent of any shared/organizer-set password a bulk-imported member may have been given. `current_password` and `new_password` are both required; 401 if `current_password` doesn't match. Returns 204 with no body."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "description": "Read-only directory of registered login accounts — used to look up a user's exact `email`/`phone` before adding them to a colony. There is no create/update/delete path here other than Auth > Register and the bulk-import login-granting paths.",
+      "item": [
+        {
+          "name": "Search Users",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users?search=priya",
+              "host": ["{{baseUrl}}"],
+              "path": ["users"],
+              "query": [
+                { "key": "search", "value": "priya", "description": "Optional, partial case-insensitive match against email OR phone" }
+              ]
+            },
+            "description": "Requires auth (one of only three GETs in this API that do — this data lets you enumerate registered accounts). `search` is optional; omit it to get the full directory (no pagination anywhere in this API). Matches partial, case-insensitive against `email` OR `phone`. Returns `[{ user_id, email, phone }]` — never `password_hash`. Either `email` or `phone` may be `null` on a given row."
           }
         }
       ]
@@ -99,7 +162,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["colonies", "mine"]
             },
-            "description": "Requires auth (one of only two GETs in this API that do). Returns the colonies the caller is a member of, each row including the caller's `role` ('admin' or 'member') in that colony."
+            "description": "Requires auth. Returns the colonies the caller is a member of, each row including the caller's `role` ('admin' or 'member') in that colony."
           }
         },
         {
@@ -110,9 +173,12 @@
             "url": {
               "raw": "{{baseUrl}}/colonies",
               "host": ["{{baseUrl}}"],
-              "path": ["colonies"]
+              "path": ["colonies"],
+              "query": [
+                { "key": "search", "value": "sunrise", "description": "Optional, partial case-insensitive match against name OR location", "disabled": true }
+              ]
             },
-            "description": "Public — no auth required. Returns all colonies ordered by colony_id."
+            "description": "Public — no auth required. Returns all colonies ordered by colony_id. Optional `?search=` matches partial, case-insensitive against `name` OR `location`."
           }
         },
         {
@@ -160,7 +226,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["colonies", "{{colonyId}}", "members"]
             },
-            "description": "Requires auth (one of only two GETs in this API that do — membership rows expose other users' emails). Does NOT require the caller to be a member of this colony themselves, just logged in. Returns each membership row with the member's `user_id`, `email`, and `role`."
+            "description": "Requires auth (membership rows expose other users' emails). Does NOT require the caller to be a member of this colony themselves, just logged in. Returns each membership row with the member's `user_id`, `email`, and `role`."
           }
         },
         {
@@ -180,7 +246,28 @@
               "host": ["{{baseUrl}}"],
               "path": ["colonies", "{{colonyId}}", "members"]
             },
-            "description": "Requires the caller to be an ADMIN of this colony. `email` must belong to an already-registered user (404 if not — there's no invite-by-email-for-strangers flow) and must not already be a member of this colony (409 if so). `role` is optional, defaults to `member`; must be `member` or `admin`."
+            "description": "Requires the caller to be an ADMIN of this colony. `email` must belong to an already-registered user (404 if not — there's no invite-by-email-for-strangers flow, and no phone-based equivalent) and must not already be a member of this colony (409 if so). `role` is optional, defaults to `member`; must be `member` or `admin`. Use Users > Search Users first if you only know the person's name."
+          }
+        },
+        {
+          "name": "Bulk Add Colony Members",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/colonies/{{colonyId}}/members/bulk",
+              "host": ["{{baseUrl}}"],
+              "path": ["colonies", "{{colonyId}}", "members", "bulk"]
+            },
+            "description": "Requires the caller to be an ADMIN of this colony (checked once for the whole request, not per row). `multipart/form-data`, a `file` field (`.csv` or `.xlsx`/`.xls`, 5MB cap) with columns `email` (required per row — must belong to an already-registered user) and `role` (optional, defaults `member`, must be `member`/`admin`). This grants colony access to people who ALREADY have accounts — for onboarding brand-new volunteers with fresh logins in one step, use Members > Bulk Import Members instead. Returns 201 with `{ created: [...], skipped: [...], errors: [...] }` — `created` rows have the same shape as Add Colony Member's response plus `row` (1-based, data rows only); `skipped` = already a member of this colony; `errors` = unregistered email or a bad `role` value. 400 if no file."
           }
         },
         {
@@ -297,7 +384,7 @@
     },
     {
       "name": "Members",
-      "description": "Volunteers/organizers — a global roster, NOT the same thing as colony membership (see Colonies folder for who can log in and manage a colony). This table has no colony_id, so writes here only require being logged in, not being a member of any particular colony. No DELETE endpoint yet (deferred).",
+      "description": "Volunteers/organizers directory — distinct from login identity (`users`, see Auth/Users folders), though a member may optionally link to one (see Grant Login below). A member is optionally colony-scoped: omit `colony_id` on create and it's a global, unscoped row writable by any authenticated user (the historical behavior); provide `colony_id` and creation requires that colony's admin, and the row becomes part of that colony's private roster (phone-uniqueness enforced per-colony, not globally). `colony_id` is immutable after creation. No DELETE endpoint yet (deferred).",
       "item": [
         {
           "name": "Create Member",
@@ -316,7 +403,30 @@
               "host": ["{{baseUrl}}"],
               "path": ["members"]
             },
-            "description": "Requires organizer auth. Only `name` is required; `phone` is optional."
+            "description": "Requires auth. `name` is required; `phone` is optional. `colony_id` (optional, not shown in this example body) scopes the row to a colony and requires that colony's admin (403 otherwise) — omit it for the old unscoped-roster behavior, any authenticated user. 409 if `phone` duplicates another row already in that same colony's roster."
+          }
+        },
+        {
+          "name": "Bulk Import Members",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] },
+                { "key": "colony_id", "type": "text", "value": "{{colonyId}}" },
+                { "key": "initial_password", "type": "text", "value": "{{initialPassword}}" }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/members/bulk",
+              "host": ["{{baseUrl}}"],
+              "path": ["members", "bulk"]
+            },
+            "description": "Requires the caller to be an ADMIN of `colony_id` (always required here, unlike single-create — a bulk roster upload is inherently \"the organizer's own colony\"). `multipart/form-data`: `file` (`.csv`/`.xlsx`/`.xls`, 5MB cap), `colony_id` (required), `initial_password` (required, the shared fallback password for any row that grants a login without its own `password` column).\n\nFile columns: `name` (required per row), `phone` (required per row — also the dedup key, per-colony only), `email` (optional — non-empty grants a login via email), `password` (optional, overrides `initial_password` for that one row only), `grant_login` (optional — truthy `yes`/`true`/`1`, case-insensitive; only consulted when `email` is empty, grants a login keyed on the row's own `phone` instead). Rows with neither `email` nor a truthy `grant_login` get no login at all — the common \"volunteer\" case.\n\nWhichever way a login is granted (email or phone), that user is ALSO automatically added to `colony_id`'s membership (role `member`) in the same atomic per-row step — so a freshly bulk-onboarded organizer immediately shows up under Colonies > List My Colonies, no separate Update Colony Role call needed.\n\nRows are processed independently (one bad row doesn't fail the batch). Returns 201 with `{ created: [...], skipped: [...], errors: [...] }` — `created` rows: `{ row, member_id, name, phone, login_granted, email? }` (`email` present only for the email-granted path). `skipped` = duplicate `phone` within this colony's roster. `errors` = missing `name`/`phone`, `email` already registered, or (phone path) that `phone` already backs another login account globally (`users.phone` is unique across all colonies, unlike the per-colony `members.phone` dedup)."
           }
         },
         {
@@ -327,9 +437,13 @@
             "url": {
               "raw": "{{baseUrl}}/members",
               "host": ["{{baseUrl}}"],
-              "path": ["members"]
+              "path": ["members"],
+              "query": [
+                { "key": "colony_id", "value": "{{colonyId}}", "description": "Optional filter", "disabled": true },
+                { "key": "search", "value": "rohit", "description": "Optional, partial case-insensitive match against name OR phone; combines with colony_id as AND", "disabled": true }
+              ]
             },
-            "description": "Public — no auth required."
+            "description": "Public — no auth required. Optional `?colony_id=` and `?search=` filters, combinable."
           }
         },
         {
@@ -362,7 +476,67 @@
               "host": ["{{baseUrl}}"],
               "path": ["members", "{{memberId}}"]
             },
-            "description": "Requires organizer auth. Partial update (send only what you want changed)."
+            "description": "Requires auth (any authenticated user, regardless of whether the row is colony-scoped). Partial update — only `name`/`phone`; `colony_id` is not PATCH-able (immutable after creation)."
+          }
+        },
+        {
+          "name": "Grant Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{memberEmail}}\",\n  \"password\": \"{{initialPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/members/{{memberId}}/grant-login",
+              "host": ["{{baseUrl}}"],
+              "path": ["members", "{{memberId}}", "grant-login"]
+            },
+            "description": "Requires colony-admin if this member has a `colony_id`, any authenticated user if it's a legacy unscoped row. Email + password only — this single-grant endpoint was NOT extended to phone (unlike Bulk Import Members, its login-granting code isn't shared with the bulk path), and it does NOT auto-add colony membership the way bulk import now does — a known, flagged inconsistency between the two. `email` and `password` are both required. Returns 201 with the updated member row (`user_id` now set). 409 if the member already has a linked login, or if `email` is already registered to someone else."
+          }
+        },
+        {
+          "name": "Reset Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"BrandNewPass789!\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/members/{{memberId}}/reset-password",
+              "host": ["{{baseUrl}}"],
+              "path": ["members", "{{memberId}}", "reset-password"]
+            },
+            "description": "Same auth gate as Grant Login. Admin override, no current-password check. `password` is required. 400 if the member has no linked login yet. Returns 200 with `{ member_id, user_id }`."
+          }
+        },
+        {
+          "name": "Update Colony Role",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"colony_id\": {{colonyId}},\n  \"role\": \"admin\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/members/{{memberId}}/colony-role",
+              "host": ["{{baseUrl}}"],
+              "path": ["members", "{{memberId}}", "colony-role"]
+            },
+            "description": "Promotes/demotes a member (who must already have a linked login) within a colony. 400 if the member has no linked login. Thin dispatcher onto the same logic as Colonies > Add Colony Member / Update Colony Member Role, so it inherits their 403 (not that colony's admin) and 400 (would demote the last admin). `colony_id` and `role` (`member`/`admin`) are both required."
           }
         }
       ]
@@ -388,7 +562,28 @@
               "host": ["{{baseUrl}}"],
               "path": ["donors"]
             },
-            "description": "Requires organizer auth. Only `name` is required; `phone` is optional."
+            "description": "Requires auth. Only `name` is required; `phone` is optional."
+          }
+        },
+        {
+          "name": "Bulk Import Donors",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/donors/bulk",
+              "host": ["{{baseUrl}}"],
+              "path": ["donors", "bulk"]
+            },
+            "description": "Requires auth (any authenticated user — donors are not colony-scoped). `multipart/form-data`, a `file` field (`.csv`/`.xlsx`/`.xls`, 5MB cap) with columns `name` (required per row) and `phone` (optional). No uniqueness constraint on donors at all, so there is no dedup — re-uploading the same file creates duplicate rows. Returns 201 with `{ created: [...], skipped: [], errors: [...] }` — `created`: `{ row, donor_id, name, phone }`; `errors`: missing `name`. `skipped` is always `[]` (kept for response-shape consistency with the other bulk-import endpoints)."
           }
         },
         {
@@ -399,9 +594,12 @@
             "url": {
               "raw": "{{baseUrl}}/donors",
               "host": ["{{baseUrl}}"],
-              "path": ["donors"]
+              "path": ["donors"],
+              "query": [
+                { "key": "search", "value": "anil", "description": "Optional, partial case-insensitive match against name OR phone", "disabled": true }
+              ]
             },
-            "description": "Public — no auth required."
+            "description": "Public — no auth required. Optional `?search=` matches partial, case-insensitive against `name` OR `phone`."
           }
         },
         {
@@ -434,7 +632,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["donors", "{{donorId}}"]
             },
-            "description": "Requires organizer auth. Partial update."
+            "description": "Requires auth. Partial update."
           }
         }
       ]
@@ -931,7 +1129,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["availability"]
             },
-            "description": "Requires organizer auth. `member_id`, `date` (YYYY-MM-DD), and `is_available` (boolean) are all required — `is_available` must be a real boolean, not a truthy string."
+            "description": "Requires auth. `member_id`, `date` (YYYY-MM-DD), and `is_available` (boolean) are all required — `is_available` must be a real boolean, not a truthy string."
           }
         },
         {
@@ -981,7 +1179,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["availability", "{{availabilityId}}"]
             },
-            "description": "Requires organizer auth. `is_available` (boolean) is required — this endpoint only updates that field."
+            "description": "Requires auth. `is_available` (boolean) is required — this endpoint only updates that field."
           }
         },
         {
@@ -996,7 +1194,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["availability", "{{availabilityId}}"]
             },
-            "description": "Requires organizer auth. HARD delete. Returns 204."
+            "description": "Requires auth. HARD delete. Returns 204."
           }
         }
       ]

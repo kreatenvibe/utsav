@@ -1,0 +1,5 @@
+ALTER TABLE users ADD COLUMN name TEXT;
+
+UPDATE users SET name = COALESCE(email, phone) WHERE name IS NULL;
+
+ALTER TABLE users ALTER COLUMN name SET NOT NULL;

@@ -82,7 +82,10 @@ router.post(
   async (req, res, next) => {
     try {
       await colonyService.getColony(req.params.id);
-      const result = await membershipService.bulkAddMembers(req.params.id, req.user.user_id, req.file);
+      const result = await membershipService.bulkAddMembers(req.params.id, req.user.user_id, {
+        file: req.file,
+        initial_password: req.body?.initial_password,
+      });
       res.status(201).json(result);
     } catch (err) {
       next(err);
@@ -110,6 +113,21 @@ router.delete('/:id/members/:userId', async (req, res, next) => {
     await colonyService.getColony(req.params.id);
     await membershipService.removeMember(req.params.id, req.user.user_id, req.params.userId);
     res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/:id/members/:userId/reset-password', async (req, res, next) => {
+  try {
+    await colonyService.getColony(req.params.id);
+    const result = await membershipService.resetMemberPassword(
+      req.params.id,
+      req.user.user_id,
+      req.params.userId,
+      req.body
+    );
+    res.json(result);
   } catch (err) {
     next(err);
   }

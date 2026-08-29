@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { colonyExists, assertColonyMember } from './colonyMembershipService.js';
+import { colonyExists, assertColonyAdmin } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
@@ -26,7 +26,7 @@ export async function createFestival({ colony_id, name, year }, actingUserId) {
     throw err;
   }
   if (await colonyExists(colony_id)) {
-    await assertColonyMember(actingUserId, colony_id);
+    await assertColonyAdmin(actingUserId, colony_id);
   }
   try {
     const { rows } = await pool.query(
@@ -68,7 +68,7 @@ export async function getFestival(id) {
 
 export async function updateFestival(id, { name, year }, actingUserId) {
   const existing = await getFestival(id);
-  await assertColonyMember(actingUserId, existing.colony_id);
+  await assertColonyAdmin(actingUserId, existing.colony_id);
   await pool.query(
     `UPDATE festival SET
        name = COALESCE($2, name),
