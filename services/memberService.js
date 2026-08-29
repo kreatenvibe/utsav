@@ -13,7 +13,13 @@ const FK_VIOLATION = '23503';
 const UNIQUE_VIOLATION = '23505';
 const MEMBERS_PHONE_CONSTRAINT = 'members_colony_id_phone_unique';
 const USERS_EMAIL_CONSTRAINT = 'users_email_key';
+const USERS_PHONE_CONSTRAINT = 'users_phone_unique';
 const SALT_ROUNDS = 10;
+
+function parseTruthy(value) {
+  if (!value) return false;
+  return ['yes', 'true', '1'].includes(String(value).trim().toLowerCase());
+}
 
 export async function createMember({ name, phone, colony_id }, actingUserId) {
   if (!name) {
@@ -133,6 +139,7 @@ export async function bulkImportMembers({ colony_id, initial_password, file }, a
     const phone = row.phone?.trim();
     const email = row.email?.trim() || null;
     const password = row.password?.trim() || initial_password;
+    const grantViaPhone = !email && parseTruthy(row.grant_login);
 
     if (!name || !phone) {
       errors.push({ row: rowNumber, phone: phone || null, reason: 'name and phone are required' });
@@ -148,16 +155,38 @@ export async function bulkImportMembers({ colony_id, initial_password, file }, a
       );
       const member = memberRows[0];
 
+      let loginGranted = false;
+      let grantedUserId = null;
+
       if (email) {
         const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
         const { rows: userRows } = await client.query(
           'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING user_id',
           [email, passwordHash]
         );
+        grantedUserId = userRows[0].user_id;
+        loginGranted = true;
+      } else if (grantViaPhone) {
+        const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+        const { rows: userRows } = await client.query(
+          'INSERT INTO users (phone, password_hash) VALUES ($1, $2) RETURNING user_id',
+          [phone, passwordHash]
+        );
+        grantedUserId = userRows[0].user_id;
+        loginGranted = true;
+      }
+
+      if (loginGranted) {
         await client.query('UPDATE members SET user_id = $2 WHERE member_id = $1', [
           member.member_id,
-          userRows[0].user_id,
+          grantedUserId,
         ]);
+        await client.query(
+          `INSERT INTO colony_memberships (colony_id, user_id, role)
+           VALUES ($1, $2, 'member')
+           ON CONFLICT (colony_id, user_id) DO NOTHING`,
+          [colony_id, grantedUserId]
+        );
       }
 
       await client.query('COMMIT');
@@ -166,7 +195,7 @@ export async function bulkImportMembers({ colony_id, initial_password, file }, a
         member_id: member.member_id,
         name,
         phone,
-        login_granted: Boolean(email),
+        login_granted: loginGranted,
         ...(email ? { email } : {}),
       });
     } catch (err) {
@@ -175,6 +204,8 @@ export async function bulkImportMembers({ colony_id, initial_password, file }, a
         skipped.push({ row: rowNumber, phone, reason: 'duplicate phone in this colony' });
       } else if (err.code === UNIQUE_VIOLATION && err.constraint === USERS_EMAIL_CONSTRAINT) {
         errors.push({ row: rowNumber, phone, reason: 'email already registered' });
+      } else if (err.code === UNIQUE_VIOLATION && err.constraint === USERS_PHONE_CONSTRAINT) {
+        errors.push({ row: rowNumber, phone, reason: 'phone already registered for login' });
       } else if (err.code === FK_VIOLATION) {
         errors.push({ row: rowNumber, phone, reason: 'colony_id does not reference an existing colony' });
       } else {

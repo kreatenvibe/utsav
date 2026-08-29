@@ -29,16 +29,23 @@ export async function registerUser({ email, password }) {
   }
 }
 
-export async function loginUser({ email, password }) {
-  if (!email || !password) {
-    const err = new Error('email and password are required');
+export async function loginUser({ email, phone, password }) {
+  if (!password || (!email && !phone)) {
+    const err = new Error('password and either email or phone are required');
+    err.status = 400;
+    throw err;
+  }
+  if (email && phone) {
+    const err = new Error('provide either email or phone, not both');
     err.status = 400;
     throw err;
   }
 
+  const column = email ? 'email' : 'phone';
+  const identifier = email || phone;
   const { rows } = await pool.query(
-    'SELECT user_id, email, password_hash FROM users WHERE email = $1',
-    [email]
+    `SELECT user_id, email, phone, password_hash FROM users WHERE ${column} = $1`,
+    [identifier]
   );
   const user = rows[0];
 
@@ -58,7 +65,7 @@ export async function loginUser({ email, password }) {
   }
 
   const token = jwt.sign(
-    { user_id: user.user_id, email: user.email },
+    { user_id: user.user_id, email: user.email, phone: user.phone },
     process.env.JWT_SECRET,
     { expiresIn: '7d' }
   );

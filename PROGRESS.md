@@ -20,6 +20,67 @@ membership below (walk-in donations, availability, self-leave). Ask user
 before picking.
 
 ## Done
+- **Phone-based login + bulk-import colony auto-link** (see
+  `plans/users-phone-login.md`): `migrations/012_users_phone_login.sql` makes
+  `users.email` nullable, adds a nullable `users.phone TEXT` with a **partial**
+  unique index `users_phone_unique ON users (phone) WHERE phone IS NOT NULL`,
+  and a `CHECK (email IS NOT NULL OR phone IS NOT NULL)` — a login identity
+  needs at least one identifier. No-op backfill (every existing row already
+  has `email`, none have `phone`).
+  **`POST /auth/login`** now accepts `{email, password}` OR `{phone,
+  password}` — 400 if neither given, 400 if both given ("provide either
+  email or phone, not both"), same ambiguous `"invalid credentials"` 401 for
+  wrong-password/unknown-identifier either way (unchanged reasoning — don't
+  leak which emails/phones exist). JWT payload is now `{user_id, email,
+  phone}` (whichever wasn't used to log in comes back `null`).
+  `POST /auth/register` is **unchanged** — email+password only, confirmed
+  out of scope; phone-based accounts are only ever created via bulk-import.
+  **`POST /members/bulk`** gains a new optional per-row `grant_login` column
+  (truthy: `yes`/`true`/`1`, case-insensitive). Existing `email`-column
+  behavior is byte-for-byte unchanged (a non-empty `email` still grants a
+  login via email). New: `email` empty + `grant_login` truthy grants a login
+  keyed on that row's own `phone` instead, using the row's `password` column
+  or the batch's `initial_password` (same fallback already used for email).
+  `email` empty + `grant_login` falsy is unchanged (plain roster row, no
+  login — the common "volunteer" case).
+  **The actual bug being fixed**: whichever path now grants a login (email
+  *or* phone) also inserts a `colony_memberships` row for that user, scoped
+  to the batch's `colony_id`, role `'member'`, in the same per-row atomic
+  transaction (`ON CONFLICT (colony_id, user_id) DO NOTHING` — defensive,
+  not expected to fire for a freshly-created login). Previously, a bulk-
+  imported member granted a login via `email` never got colony access at
+  all — they wouldn't show up under `/colonies/mine` for their own colony
+  until an admin separately ran `PATCH /members/:id/colony-role`.
+  New row-level error case: the row's `phone` already backs another user's
+  login account (global unique violation on `users.phone`, distinct from
+  the existing per-colony `members.phone` dedup which still lands in
+  `skipped`) → `errors` entry, `"phone already registered for login"`.
+  **Not shared, confirmed and left alone**: `bulkImportMembers` and
+  `grantLogin` (the single `POST /members/:id/grant-login` endpoint) were
+  already two separate inline `INSERT INTO users` blocks, not a shared
+  helper — so per explicit instruction, phone-login-granting was added only
+  to the bulk path. `POST /members/:id/grant-login` is unchanged (still
+  email+password only, no colony auto-link). Flagging this as an
+  inconsistency for later, not fixing it now.
+  **`GET /users?search=`** now matches partial against `email` OR `phone`
+  (was email-only); response shape is now `[{user_id, email, phone}]` (was
+  `[{user_id, email}]`) — still auth-required, still never `password_hash`.
+  New `test/usersPhoneLogin.test.js` (7 cases): phone-login success + wrong
+  password, both-identifiers-400, neither-identifier-400, email-path bulk
+  import now auto-links colony membership (regression coverage for the bug
+  fix), `grant_login=false` with no email still grants nothing, phone
+  already registered for login (cross-colony — same phone in two different
+  colonies' rosters, since `members.phone` uniqueness is per-colony but
+  `users.phone` is global, so a same-colony duplicate phone hits the
+  existing `members_colony_id_phone_unique` check first and lands in
+  `skipped`, not `errors`), and `/users?search=` matching by phone. All 17
+  tests pass (10 pre-existing across the other two suites + these 7 new
+  ones), verified against the local docker Postgres (`.env` swapped, `npm run
+  migrate` applied `012_users_phone_login.sql` cleanly, `npm test`, `.env`
+  restored to the Render line afterward — same swap-and-restore convention
+  as every prior session). `docs/BACKEND_ANALYSIS.md` updated: §3 `users`
+  entity, §4 Auth/Users/Members endpoint tables and bodies, §5
+  authorization, §7 error table.
 - **Bulk-add colony members + bulk-import donors** (see
   `plans/colonies-donors-bulk-import.md`): two new file-driven bulk-write
   endpoints, reusing `/members/bulk`'s existing infrastructure rather than
