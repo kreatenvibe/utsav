@@ -1,9 +1,12 @@
 import { Router } from 'express';
+import multer from 'multer';
 import * as colonyService from '../services/colonyService.js';
 import * as membershipService from '../services/colonyMembershipService.js';
 import { requireAuth } from '../middleware/auth.js';
 
 export const router = Router();
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 router.post('/', async (req, res, next) => {
   try {
@@ -64,6 +67,28 @@ router.post('/:id/members', async (req, res, next) => {
     next(err);
   }
 });
+
+router.post(
+  '/:id/members/bulk',
+  (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        err.status = 400;
+        return next(err);
+      }
+      next();
+    });
+  },
+  async (req, res, next) => {
+    try {
+      await colonyService.getColony(req.params.id);
+      const result = await membershipService.bulkAddMembers(req.params.id, req.user.user_id, req.file);
+      res.status(201).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 router.patch('/:id/members/:userId', async (req, res, next) => {
   try {

@@ -206,6 +206,7 @@ Base URL has no global prefix (e.g. routes are mounted directly at `/colonies`, 
 | PATCH | `/colonies/:id` | Edit name/location | 🔒, colony-admin only |
 | GET | `/colonies/:id/members` | List a colony's members (email + role) | 🔒 (always) |
 | POST | `/colonies/:id/members` | Add a user (by email) to the colony | 🔒, colony-admin only |
+| POST | `/colonies/:id/members/bulk` | Add many users (by email) from a CSV/XLSX file | 🔒, colony-admin only |
 | PATCH | `/colonies/:id/members/:userId` | Change a member's role | 🔒, colony-admin only |
 | DELETE | `/colonies/:id/members/:userId` | Remove a member | 🔒, colony-admin only |
 
@@ -214,6 +215,16 @@ Base URL has no global prefix (e.g. routes are mounted directly at `/colonies`, 
 - Role update body: `{ role }`. 400 if it would demote the last admin.
 - Note: `/colonies/mine` must be registered before `/colonies/:id` in the router (it is) or Express would treat "mine" as an `:id` value.
 - `?search=` (new) matches partial, case-insensitive against `name` OR `location`. Optional and additive — omit it and the response is the full list, unchanged.
+
+**Bulk add members** (`POST /colonies/:id/members/bulk`, new) — `multipart/form-data`: a `file` field (`.csv` or `.xlsx`/`.xls`, 5MB cap), same file-parsing infrastructure as `/members/bulk` (`csv-parse`/`exceljs`, dispatched by extension). Admin-of-`:id` is checked **once** up front for the whole request, not per row. File columns: `email` (required per row), `role` (optional, defaults `'member'`, must be `'admin'`/`'member'` if given). Each row reuses the exact same logic as single `POST /colonies/:id/members` (no separate validation path): no registered user with that email → row-level `errors`; already a member of this colony → row-level `skipped` (benign, same treatment as a duplicate phone in `/members/bulk` — nothing to do); bad `role` value → row-level `errors`. Response `201`:
+```json
+{
+  "created": [{ "row": 1, "colony_membership_id": 9, "colony_id": 3, "user_id": 12, "role": "member", "created_at": "..." }],
+  "skipped": [{ "row": 2, "email": "...", "reason": "that user is already a member of this colony" }],
+  "errors":  [{ "row": 3, "email": "...", "reason": "no registered user with that email" }]
+}
+```
+`created` rows are exactly what single-add already returns (`colony_membership_id, colony_id, user_id, role, created_at` — no `email` field, since that's what the underlying insert returns) plus `row`. `row` is 1-based, data rows only. Top-level 400 if no file; 404 if `:id` doesn't resolve to a colony; 403 if the caller isn't that colony's admin (same as single-add, checked once for the whole batch).
 
 ### Festivals
 
@@ -266,11 +277,22 @@ Create body: `{ name, phone?, colony_id? }`. `colony_id` is optional (migration 
 | Method | Endpoint | Purpose | Auth |
 |---|---|---|---|
 | POST | `/donors` | Create | 🔒 |
+| POST | `/donors/bulk` | Create many from a CSV/XLSX file | 🔒 (any authenticated user, not colony-scoped) |
 | GET | `/donors?search=` | List, optional partial name/phone search | — |
 | GET | `/donors/:id` | Detail | — |
 | PATCH | `/donors/:id` | Edit name/phone | 🔒 |
 
 Same shape as Members; not colony-scoped. `?search=` (new) matches partial, case-insensitive against `name` OR `phone`, same as Members' search. Optional and additive.
+
+**Bulk import** (`POST /donors/bulk`, new) — `multipart/form-data`, `file` field only (`.csv`/`.xlsx`/`.xls`, 5MB cap, same parsing infrastructure as `/members/bulk`). No colony scoping and no admin gate — same auth as single `POST /donors` (any authenticated user). File columns: `name` (required per row), `phone` (optional). Donors have **no uniqueness constraint** on name or phone (unlike Members' colony-scoped phone uniqueness), so there is no dedup rule and no `skipped` case — every row with a name lands in `created`; only a missing name produces a row-level `errors` entry. Response `201`:
+```json
+{
+  "created": [{ "row": 1, "donor_id": 7, "name": "...", "phone": "..." }],
+  "skipped": [],
+  "errors":  [{ "row": 2, "name": null, "reason": "name is required" }]
+}
+```
+`skipped` is always `[]` — kept in the response for the same three-key shape as `/members/bulk`, not because a duplicate case exists. Top-level 400 if no file.
 
 ### Expected Donations (pledges)
 
@@ -475,8 +497,8 @@ Notes for a mobile client:
 **Purpose:** View a colony, and (if admin) manage its membership.
 **Who can access it:** Anyone for the base detail (public read); membership list/management requires being logged in, admin-only for mutation.
 **Data required:** `GET /colonies/:id`; `GET /colonies/:id/members` (auth required); `GET /users?search=` (auth required) to look up the user to add.
-**APIs required:** `GET /colonies/:id`, `PATCH /colonies/:id` (admin), `GET /colonies/:id/members`, `GET /users?search=`, `POST /colonies/:id/members`, `PATCH /colonies/:id/members/:userId`, `DELETE /colonies/:id/members/:userId`.
-**Actions:** Edit name/location (admin only); search registered users by partial email via `GET /users?search=` and pick one instead of typing an exact email blind, then add them (admin only — `POST /colonies/:id/members` still takes `{ email, role? }` and still 404s if the email somehow doesn't resolve, e.g. a race where the account was deleted between search and submit); promote/demote a member; remove a member (blocked if it's the last admin).
+**APIs required:** `GET /colonies/:id`, `PATCH /colonies/:id` (admin), `GET /colonies/:id/members`, `GET /users?search=`, `POST /colonies/:id/members`, `POST /colonies/:id/members/bulk`, `PATCH /colonies/:id/members/:userId`, `DELETE /colonies/:id/members/:userId`.
+**Actions:** Edit name/location (admin only); search registered users by partial email via `GET /users?search=` and pick one instead of typing an exact email blind, then add them (admin only — `POST /colonies/:id/members` still takes `{ email, role? }` and still 404s if the email somehow doesn't resolve, e.g. a race where the account was deleted between search and submit); bulk-add many users at once via a CSV/XLSX file of emails (admin only — `POST /colonies/:id/members/bulk`), showing the created/skipped/error breakdown per row (skipped = already a member, error = unregistered email or bad role); promote/demote a member; remove a member (blocked if it's the last admin).
 **States:** Loading; Error (403 if not admin attempting a mutation, 404 if email unregistered, 400 on last-admin removal); Success. Note `GET /users` has no name field to show in a picker — display `email` only (see §3).
 
 ### Screen: Festival Dashboard
@@ -490,9 +512,9 @@ Notes for a mobile client:
 ### Screen: Donors Directory + Donor Detail
 **Purpose:** Manage the list of people who give money; drill into one donor's pledges/gifts.
 **Data required:** `GET /donors`, `GET /donors/:id`, and filtered `GET /expected-donations?donor_id=`, `GET /donations?donor_id=`.
-**APIs required:** `POST /donors`, `GET /donors`, `GET /donors/:id`, `PATCH /donors/:id`.
-**Actions:** Add/edit a donor; view their pledge and payment history (multiple calls, not bundled by the API).
-**States:** Loading; Empty; Error; Success.
+**APIs required:** `POST /donors`, `POST /donors/bulk`, `GET /donors`, `GET /donors/:id`, `PATCH /donors/:id`.
+**Actions:** Add/edit a donor; bulk-import many donors at once via a CSV/XLSX file (name required, phone optional — no dedup, so re-uploading the same file creates duplicates); view their pledge and payment history (multiple calls, not bundled by the API).
+**States:** Loading; Empty; Error (per-row errors surfaced from the bulk-import response, same convention as the Volunteer Roster's bulk upload); Success.
 
 ### Screen: Pledges (Expected Donations) List + Detail
 **Purpose:** Track what donors promised vs. what's actually been paid.

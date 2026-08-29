@@ -1,4 +1,5 @@
 import { pool } from '../db/pool.js';
+import { parseRoster } from './rosterParser.js';
 
 const UNIQUE_VIOLATION = '23505';
 
@@ -110,8 +111,10 @@ async function isSoleAdmin(colonyId, userId) {
   return membership?.role === 'admin' && Number(membership.admin_count) <= 1;
 }
 
-export async function addMember(colonyId, actingUserId, { email, role = 'member' }) {
-  await assertColonyAdmin(actingUserId, colonyId);
+// Shared by addMember (single) and bulkAddMembers (per-row) — caller is
+// responsible for the assertColonyAdmin check, done once per request rather
+// than once per row for bulk.
+async function insertMembership(colonyId, { email, role = 'member' }) {
   if (!email) {
     const err = new Error('email is required');
     err.status = 400;
@@ -143,6 +146,46 @@ export async function addMember(colonyId, actingUserId, { email, role = 'member'
     }
     throw err;
   }
+}
+
+export async function addMember(colonyId, actingUserId, { email, role = 'member' }) {
+  await assertColonyAdmin(actingUserId, colonyId);
+  return insertMembership(colonyId, { email, role });
+}
+
+export async function bulkAddMembers(colonyId, actingUserId, file) {
+  if (!file) {
+    const err = new Error('file is required');
+    err.status = 400;
+    throw err;
+  }
+  await assertColonyAdmin(actingUserId, colonyId);
+
+  const rows = await parseRoster(file);
+
+  const created = [];
+  const skipped = [];
+  const errors = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const rowNumber = i + 1;
+    const row = rows[i];
+    const email = row.email?.trim() || null;
+    const role = row.role?.trim() || 'member';
+
+    try {
+      const membership = await insertMembership(colonyId, { email, role });
+      created.push({ row: rowNumber, ...membership });
+    } catch (err) {
+      if (err.status === 409) {
+        skipped.push({ row: rowNumber, email, reason: err.message });
+      } else {
+        errors.push({ row: rowNumber, email, reason: err.message });
+      }
+    }
+  }
+
+  return { created, skipped, errors };
 }
 
 export async function updateMemberRole(colonyId, actingUserId, targetUserId, role) {

@@ -20,6 +20,58 @@ membership below (walk-in donations, availability, self-leave). Ask user
 before picking.
 
 ## Done
+- **Bulk-add colony members + bulk-import donors** (see
+  `plans/colonies-donors-bulk-import.md`): two new file-driven bulk-write
+  endpoints, reusing `/members/bulk`'s existing infrastructure rather than
+  inventing a second CSV/XLSX parser. Extracted `parseRoster`/`parseCsv`/
+  `parseXlsx`/`normalizeHeader` out of `services/memberService.js` into a new
+  `services/rosterParser.js` (avoids a circular import, since
+  `colonyMembershipService.js` needed the parser too and `memberService.js`
+  already imports *from* `colonyMembershipService.js`); `memberService.js`'s
+  own behavior is unchanged, just re-pointed at the shared module.
+  - **`POST /colonies/:id/members/bulk`** (new route on `routes/colonies.js`,
+    same inline multer-wrapping pattern as `/members/bulk`): admin-of-`:id`
+    is asserted **once** for the whole request, not per row (per explicit
+    instruction — same convention `/members/bulk` already uses for its
+    `colony_id` admin check). Refactored `colonyMembershipService.addMember`
+    into a shared `insertMembership(colonyId, {email, role})` helper (does
+    the validation/lookup/insert/409-translation, no auth check of its own)
+    so `addMember` = assert-admin + `insertMembership`, and the new
+    `bulkAddMembers` = assert-admin-once + `insertMembership` per row — no
+    duplicated validation logic between single and bulk. File columns:
+    `email` (required per row), `role` (optional, defaults `'member'`, must
+    be `'admin'`/`'member'` if given). Row outcomes map 1:1 onto single-add's
+    existing status codes: no registered user with that email (404 case) →
+    `errors`; already a member of this colony (409 case) → `skipped` (benign,
+    same treatment as a duplicate phone in `/members/bulk`); bad role →
+    `errors`. `created` row shape is exactly `insertMembership`'s return
+    (`colony_membership_id, colony_id, user_id, role, created_at` — no
+    `email` field, since the single-add endpoint's response doesn't have one
+    either) plus `row`. Top-level 400 if no file; existing `getColony`
+    404 and `assertColonyAdmin` 403 reused unchanged.
+  - **`POST /donors/bulk`** (new route on `routes/donors.js`, same multer
+    pattern): no colony scoping, same auth as single `POST /donors` (any
+    authenticated user). File columns: `name` (required per row), `phone`
+    (optional). Donors have no uniqueness constraint at all (unlike Members'
+    colony-scoped phone uniqueness) — deliberately did **not** invent a dedup
+    rule, per explicit instruction. Every row with a name lands in `created`;
+    missing name → `errors`. Response keeps the `{ created, skipped, errors }`
+    three-key shape for client-parser consistency with `/members/bulk`, but
+    `skipped` is always `[]` since there's no duplicate case to detect.
+    `created` row shape: `{ row, donor_id, name, phone }`.
+  New `test/bulkImport.test.js` (own register/login/colony helpers, same
+  supertest-against-real-Postgres style as `test/colonyMembership.test.js`):
+  colony bulk-add covering created/skipped(already-member)/errors(unregistered
+  email, bad role)/403(non-admin)/400(no file) in one mixed-file request;
+  donor bulk-import covering created/error(missing name)/no-dedup (same
+  name+phone twice, both created). All 11 tests (9 pre-existing + 2 new) pass.
+  Manually verified via the test suite only (no separate manual Postman pass
+  requested) against the local docker Postgres (`.env` swapped to the
+  commented-out local line, `npm run migrate` — no new migrations needed,
+  schema unchanged — then `npm test`, then `.env` restored to the Render
+  line afterward, same swap-and-restore convention as every prior session).
+  `docs/BACKEND_ANALYSIS.md` updated: §4 Colonies and Donors endpoint tables
+  and bodies, §8 Colony Detail/Members and Donors Directory screens' Actions.
 - **Search filters on list/GET endpoints + new user directory** (audit
   requested by user, no plan file — small, additive, no schema change):
   added `?search=` to four existing list endpoints and one brand-new

@@ -1,4 +1,5 @@
 import { pool } from '../db/pool.js';
+import { parseRoster } from './rosterParser.js';
 
 export async function createDonor({ name, phone }) {
   if (!name) {
@@ -33,6 +34,44 @@ export async function getDonor(id) {
     throw err;
   }
   return rows[0];
+}
+
+export async function bulkImportDonors(file) {
+  if (!file) {
+    const err = new Error('file is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const rows = await parseRoster(file);
+
+  const created = [];
+  const skipped = [];
+  const errors = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const rowNumber = i + 1;
+    const row = rows[i];
+    const name = row.name?.trim();
+    const phone = row.phone?.trim() || null;
+
+    if (!name) {
+      errors.push({ row: rowNumber, name: null, reason: 'name is required' });
+      continue;
+    }
+
+    try {
+      const { rows: donorRows } = await pool.query(
+        'INSERT INTO donors (name, phone) VALUES ($1, $2) RETURNING donor_id',
+        [name, phone]
+      );
+      created.push({ row: rowNumber, donor_id: donorRows[0].donor_id, name, phone });
+    } catch (err) {
+      errors.push({ row: rowNumber, name, reason: err.message });
+    }
+  }
+
+  return { created, skipped, errors };
 }
 
 export async function updateDonor(id, { name, phone }) {
