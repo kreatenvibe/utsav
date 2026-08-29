@@ -29,7 +29,14 @@ export async function createColony({ name, location }, actingUserId) {
   }
 }
 
-export async function listColonies() {
+export async function listColonies({ search } = {}) {
+  if (search) {
+    const { rows } = await pool.query(
+      'SELECT * FROM colony WHERE name ILIKE $1 OR location ILIKE $1 ORDER BY colony_id',
+      [`%${search}%`]
+    );
+    return rows;
+  }
   const { rows } = await pool.query('SELECT * FROM colony ORDER BY colony_id');
   return rows;
 }

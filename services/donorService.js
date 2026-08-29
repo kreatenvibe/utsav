@@ -13,7 +13,14 @@ export async function createDonor({ name, phone }) {
   return rows[0];
 }
 
-export async function listDonors() {
+export async function listDonors({ search } = {}) {
+  if (search) {
+    const { rows } = await pool.query(
+      'SELECT * FROM donors WHERE name ILIKE $1 OR phone ILIKE $1 ORDER BY donor_id',
+      [`%${search}%`]
+    );
+    return rows;
+  }
   const { rows } = await pool.query('SELECT * FROM donors ORDER BY donor_id');
   return rows;
 }

@@ -41,7 +41,7 @@ router.post(
 
 router.get('/', async (req, res, next) => {
   try {
-    res.json(await memberService.listMembers({ colony_id: req.query.colony_id }));
+    res.json(await memberService.listMembers({ colony_id: req.query.colony_id, search: req.query.search }));
   } catch (err) {
     next(err);
   }

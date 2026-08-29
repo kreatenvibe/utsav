@@ -46,15 +46,22 @@ export async function createMember({ name, phone, colony_id }, actingUserId) {
   }
 }
 
-export async function listMembers({ colony_id } = {}) {
+export async function listMembers({ colony_id, search } = {}) {
+  const conditions = [];
+  const params = [];
   if (colony_id) {
-    const { rows } = await pool.query(
-      'SELECT * FROM members WHERE colony_id = $1 ORDER BY member_id',
-      [colony_id]
-    );
-    return rows;
+    params.push(colony_id);
+    conditions.push(`colony_id = $${params.length}`);
   }
-  const { rows } = await pool.query('SELECT * FROM members ORDER BY member_id');
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`(name ILIKE $${params.length} OR phone ILIKE $${params.length})`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const { rows } = await pool.query(
+    `SELECT * FROM members ${where} ORDER BY member_id`,
+    params
+  );
   return rows;
 }
 

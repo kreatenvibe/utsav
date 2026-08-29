@@ -20,6 +20,52 @@ membership below (walk-in donations, availability, self-leave). Ask user
 before picking.
 
 ## Done
+- **Search filters on list/GET endpoints + new user directory** (audit
+  requested by user, no plan file — small, additive, no schema change):
+  added `?search=` to four existing list endpoints and one brand-new
+  endpoint, all case-insensitive partial match via `ILIKE '%term%'`, all
+  purely additive on top of the existing full-list-no-pagination design
+  (omit `search` and behavior is byte-for-byte unchanged). No auth/response
+  shape changes on any touched endpoint except the new `GET /users`.
+  - **`GET /users?search=`** (new route + new `services/userService.js`):
+    there was no user directory at all before this — the only way to add
+    someone to a colony was `POST /colonies/:id/members` with their exact
+    email (404 if it didn't match). Matches partial, case-insensitive
+    against `email` only — **`users` has no name column**
+    (`migrations/008_users.sql`: just `user_id`/`email`/`password_hash`/
+    `created_at`), so despite the request mentioning "name field on users,
+    if one exists," there isn't one; documented here instead of forcing a
+    match against a nonexistent field. Returns only `user_id` and `email`
+    (no `password_hash`). `requireAuth`-gated on the GET, same as
+    `GET /colonies/mine` and `GET /colonies/:id/members` — same reasoning
+    (a public user-search-by-email endpoint is an email enumeration risk).
+    No query param at all still returns the full directory (same
+    always-a-list convention as every other GET in this app).
+  - **`GET /donors?search=`**: matches partial `name` OR `phone`. No auth
+    change (donors reads were already public, still are).
+  - **`GET /members?search=`**: matches partial `name` OR `phone`,
+    combinable with the existing `?colony_id=` filter (both apply as AND
+    when both given). No auth change.
+  - **`GET /colonies?search=`**: matches partial `name` OR `location`. No
+    auth change (this is the plain `GET /colonies` list, unrelated to the
+    already-`requireAuth`'d `GET /colonies/mine`/`GET /colonies/:id/members`
+    — those two were deliberately left untouched, per explicit instruction).
+  Manually verified against the docker Postgres + running server: `GET
+  /users` with no token (401); with a token, `?search=` matching one
+  registered email, a no-match search (empty array), and no param (full
+  list, minimal fields only); `GET /donors?search=` matching by partial
+  name and by partial phone digits; `GET /colonies?search=` matching by
+  partial name and by a location string with a space; `GET /members?search=`
+  matching two same-named members in different colonies, then combined with
+  `?colony_id=` to confirm it narrows to just the one in-colony match and
+  excludes the other colony's same-named member. All 9 pre-existing tests
+  in `test/colonyMembership.test.js` still pass unchanged.
+  **For the mobile client / `docs/BACKEND_ANALYSIS.md`**: these are the
+  exact new/changed endpoints — `GET /users?search=` (new, auth required,
+  returns `[{user_id, email}]`), `GET /donors?search=`, `GET
+  /members?search=` (combinable with existing `?colony_id=`), `GET
+  /colonies?search=`. No endpoint's authorization, response shape, or
+  pagination behavior changed otherwise.
 - **Member bulk import + login granting/promotion** (see
   `plans/members-bulk-import-login.md`): `migrations/011_members_login_link.sql`
   adds `members.user_id INTEGER UNIQUE REFERENCES users(user_id)`, nullable —

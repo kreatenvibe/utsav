@@ -16,7 +16,7 @@ router.post('/', async (req, res, next) => {
 
 router.get('/', async (req, res, next) => {
   try {
-    res.json(await colonyService.listColonies());
+    res.json(await colonyService.listColonies({ search: req.query.search }));
   } catch (err) {
     next(err);
   }

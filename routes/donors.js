@@ -13,7 +13,7 @@ router.post('/', async (req, res, next) => {
 
 router.get('/', async (req, res, next) => {
   try {
-    res.json(await donorService.listDonors());
+    res.json(await donorService.listDonors({ search: req.query.search }));
   } catch (err) {
     next(err);
   }
