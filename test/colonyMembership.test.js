@@ -1,25 +1,33 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import bcrypt from 'bcryptjs';
 import request from 'supertest';
 import { app } from '../app.js';
 import { pool } from '../db/pool.js';
 
 const created = { userIds: [], colonyIds: [], festivalIds: [] };
 
-function uniqueEmail(label) {
-  return `${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@test.local`;
+function uniquePhone() {
+  return `9${Date.now().toString().slice(-9)}${Math.floor(Math.random() * 10)}`;
 }
 
-async function registerAndLogin(label) {
-  const email = uniqueEmail(label);
+// There is no self-registration endpoint anymore (POST /auth/register was
+// removed — every account is created via a colony admin). Tests bootstrap
+// their first users the same way a real deployment's first admin would
+// have to be provisioned: a direct insert, bypassing the API.
+async function createLoginUser(label) {
+  const phone = uniquePhone();
   const password = 'password123';
-  const registerRes = await request(app).post('/auth/register').send({ name: label, email, password });
-  assert.equal(registerRes.status, 201);
-  created.userIds.push(registerRes.body.user_id);
+  const passwordHash = await bcrypt.hash(password, 10);
+  const { rows } = await pool.query(
+    'INSERT INTO users (name, phone, password_hash) VALUES ($1, $2, $3) RETURNING user_id',
+    [label, phone, passwordHash]
+  );
+  created.userIds.push(rows[0].user_id);
 
-  const loginRes = await request(app).post('/auth/login').send({ email, password });
+  const loginRes = await request(app).post('/auth/login').send({ phone, password });
   assert.equal(loginRes.status, 200);
-  return { userId: registerRes.body.user_id, token: loginRes.body.token };
+  return { userId: rows[0].user_id, phone, token: loginRes.body.token };
 }
 
 async function createColony(token) {
@@ -58,7 +66,7 @@ after(async () => {
 });
 
 test('creating a colony auto-admins the creator', async () => {
-  const admin = await registerAndLogin('admin');
+  const admin = await createLoginUser('admin');
   const colony = await createColony(admin.token);
 
   const mine = await request(app)
@@ -71,8 +79,8 @@ test('creating a colony auto-admins the creator', async () => {
 });
 
 test('a non-member is blocked from writing under someone else\'s colony', async () => {
-  const admin = await registerAndLogin('admin');
-  const outsider = await registerAndLogin('outsider');
+  const admin = await createLoginUser('admin');
+  const outsider = await createLoginUser('outsider');
   const colony = await createColony(admin.token);
 
   const res = await createFestival(outsider.token, colony.colony_id);
@@ -80,15 +88,14 @@ test('a non-member is blocked from writing under someone else\'s colony', async 
 });
 
 test('admin can add a plain member by linking their existing account, but a plain member still cannot write scoped data', async () => {
-  const admin = await registerAndLogin('admin');
-  const member = await registerAndLogin('member');
+  const admin = await createLoginUser('admin');
+  const member = await createLoginUser('member');
   const colony = await createColony(admin.token);
-  const memberEmail = (await pool.query('SELECT email FROM users WHERE user_id = $1', [member.userId])).rows[0].email;
 
   const addRes = await request(app)
     .post(`/colonies/${colony.colony_id}/members`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .send({ email: memberEmail, role: 'member' });
+    .send({ phone: member.phone, role: 'member' });
   assert.equal(addRes.status, 201);
   assert.equal(addRes.body.role, 'member');
   assert.equal(addRes.body.account, 'linked');
@@ -99,23 +106,21 @@ test('admin can add a plain member by linking their existing account, but a plai
 });
 
 test('a non-admin member cannot add or remove members', async () => {
-  const admin = await registerAndLogin('admin');
-  const member = await registerAndLogin('member');
-  const outsider = await registerAndLogin('outsider');
+  const admin = await createLoginUser('admin');
+  const member = await createLoginUser('member');
+  const outsider = await createLoginUser('outsider');
   const colony = await createColony(admin.token);
 
-  const memberEmail = (await pool.query('SELECT email FROM users WHERE user_id = $1', [member.userId])).rows[0].email;
   const addMember = await request(app)
     .post(`/colonies/${colony.colony_id}/members`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .send({ email: memberEmail, role: 'member' });
+    .send({ phone: member.phone, role: 'member' });
   assert.equal(addMember.status, 201);
 
-  const outsiderEmail = (await pool.query('SELECT email FROM users WHERE user_id = $1', [outsider.userId])).rows[0].email;
   const blockedAdd = await request(app)
     .post(`/colonies/${colony.colony_id}/members`)
     .set('Authorization', `Bearer ${member.token}`)
-    .send({ email: outsiderEmail, role: 'member' });
+    .send({ phone: outsider.phone, role: 'member' });
   assert.equal(blockedAdd.status, 403);
 
   const blockedRemove = await request(app)
@@ -125,7 +130,7 @@ test('a non-admin member cannot add or remove members', async () => {
 });
 
 test('the last admin of a colony cannot be removed or demoted', async () => {
-  const admin = await registerAndLogin('admin');
+  const admin = await createLoginUser('admin');
   const colony = await createColony(admin.token);
 
   const removeRes = await request(app)
@@ -146,7 +151,7 @@ test('unauthenticated writes are still rejected (auth regression check)', async 
 });
 
 test('colony reads stay public with no token (regression check)', async () => {
-  const admin = await registerAndLogin('admin');
+  const admin = await createLoginUser('admin');
   const colony = await createColony(admin.token);
 
   const res = await request(app).get(`/colonies/${colony.colony_id}`);
@@ -155,15 +160,14 @@ test('colony reads stay public with no token (regression check)', async () => {
 });
 
 test('admin-only gate reaches expenses/expense_payments and tasks/task_assignments via the festival->colony chain; a plain member is blocked too', async () => {
-  const admin = await registerAndLogin('admin');
-  const member = await registerAndLogin('member');
-  const outsider = await registerAndLogin('outsider');
+  const admin = await createLoginUser('admin');
+  const member = await createLoginUser('member');
+  const outsider = await createLoginUser('outsider');
   const colony = await createColony(admin.token);
-  const memberEmail = (await pool.query('SELECT email FROM users WHERE user_id = $1', [member.userId])).rows[0].email;
   const addMemberRes = await request(app)
     .post(`/colonies/${colony.colony_id}/members`)
     .set('Authorization', `Bearer ${admin.token}`)
-    .send({ email: memberEmail, role: 'member' });
+    .send({ phone: member.phone, role: 'member' });
   assert.equal(addMemberRes.status, 201);
 
   const festivalRes = await createFestival(admin.token, colony.colony_id);
@@ -226,7 +230,7 @@ test('admin-only gate reaches expenses/expense_payments and tasks/task_assignmen
     .send({ task_id: task.body.task_id, user_id: member.userId });
   assert.equal(okTaskAssignment.status, 201);
   assert.equal(okTaskAssignment.body.user_id, member.userId);
-  assert.equal(okTaskAssignment.body.user.email, memberEmail);
+  assert.equal(okTaskAssignment.body.user.phone, member.phone);
 
   await pool.query('DELETE FROM task_assignments WHERE assignment_id = $1', [okTaskAssignment.body.assignment_id]);
   await pool.query('DELETE FROM tasks WHERE task_id = $1', [task.body.task_id]);
@@ -235,8 +239,8 @@ test('admin-only gate reaches expenses/expense_payments and tasks/task_assignmen
 });
 
 test('donations tied to a pledge require colony-admin via expected_donation->festival->colony; walk-in donations now require admin-of-any-colony instead of being unscoped', async () => {
-  const admin = await registerAndLogin('admin');
-  const outsider = await registerAndLogin('outsider');
+  const admin = await createLoginUser('admin');
+  const outsider = await createLoginUser('outsider');
   const colony = await createColony(admin.token);
   const festivalRes = await createFestival(admin.token, colony.colony_id);
   const festivalId = festivalRes.body.festival_id;
@@ -281,4 +285,46 @@ test('donations tied to a pledge require colony-admin via expected_donation->fes
   await pool.query('DELETE FROM donations WHERE donation_id = ANY($1)', [[okDonation.body.donation_id, okWalkIn.body.donation_id]]);
   await pool.query('DELETE FROM expected_donations WHERE expected_id = $1', [expectedRes.body.expected_id]);
   await pool.query('DELETE FROM donors WHERE donor_id = $1', [donorRes.body.donor_id]);
+});
+
+test('POST /auth/login: missing phone or password is 400', async () => {
+  const missingPassword = await request(app).post('/auth/login').send({ phone: '9990000000' });
+  assert.equal(missingPassword.status, 400);
+
+  const missingPhone = await request(app).post('/auth/login').send({ password: 'x' });
+  assert.equal(missingPhone.status, 400);
+});
+
+test('POST /auth/login: unknown phone or wrong password is 401 with the same message', async () => {
+  const admin = await createLoginUser('admin');
+
+  const unknownPhone = await request(app).post('/auth/login').send({ phone: '9990000000', password: 'x' });
+  assert.equal(unknownPhone.status, 401);
+  assert.equal(unknownPhone.body.error, 'invalid credentials');
+
+  const wrongPassword = await request(app).post('/auth/login').send({ phone: admin.phone, password: 'wrong' });
+  assert.equal(wrongPassword.status, 401);
+  assert.equal(wrongPassword.body.error, 'invalid credentials');
+});
+
+test('POST /auth/register no longer exists', async () => {
+  const admin = await createLoginUser('register-check-admin');
+  const res = await request(app)
+    .post('/auth/register')
+    .set('Authorization', `Bearer ${admin.token}`)
+    .send({ name: 'x', phone: '9990000001', password: 'x' });
+  assert.equal(res.status, 404, 'authenticated so the app-wide write gate does not shadow the route-not-found check');
+});
+
+test('GET /users?search= matches partial name/phone and never returns email', async () => {
+  const admin = await createLoginUser('Searchable Volunteer');
+
+  const searchRes = await request(app)
+    .get(`/users?search=${admin.phone.slice(-6)}`)
+    .set('Authorization', `Bearer ${admin.token}`);
+  assert.equal(searchRes.status, 200);
+  const match = searchRes.body.find((u) => u.phone === admin.phone);
+  assert.ok(match, 'search by partial phone should find the user');
+  assert.equal(match.name, 'Searchable Volunteer');
+  assert.equal('email' in match, false);
 });

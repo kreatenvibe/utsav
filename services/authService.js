@@ -4,48 +4,16 @@ import { pool } from '../db/pool.js';
 
 const SALT_ROUNDS = 10;
 
-export async function registerUser({ name, email, password }) {
-  if (!name || !email || !password) {
-    const err = new Error('name, email, and password are required');
+export async function loginUser({ phone, password }) {
+  if (!phone || !password) {
+    const err = new Error('phone and password are required');
     err.status = 400;
     throw err;
   }
 
-  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-  try {
-    const { rows } = await pool.query(
-      'INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING user_id, name, email',
-      [name, email, passwordHash]
-    );
-    return rows[0];
-  } catch (err) {
-    if (err.code === '23505') {
-      const conflict = new Error('email already registered');
-      conflict.status = 409;
-      throw conflict;
-    }
-    throw err;
-  }
-}
-
-export async function loginUser({ email, phone, password }) {
-  if (!password || (!email && !phone)) {
-    const err = new Error('password and either email or phone are required');
-    err.status = 400;
-    throw err;
-  }
-  if (email && phone) {
-    const err = new Error('provide either email or phone, not both');
-    err.status = 400;
-    throw err;
-  }
-
-  const column = email ? 'email' : 'phone';
-  const identifier = email || phone;
   const { rows } = await pool.query(
-    `SELECT user_id, email, phone, password_hash FROM users WHERE ${column} = $1`,
-    [identifier]
+    'SELECT user_id, phone, password_hash FROM users WHERE phone = $1',
+    [phone]
   );
   const user = rows[0];
 
@@ -65,7 +33,7 @@ export async function loginUser({ email, phone, password }) {
   }
 
   const token = jwt.sign(
-    { user_id: user.user_id, email: user.email, phone: user.phone },
+    { user_id: user.user_id, phone: user.phone },
     process.env.JWT_SECRET,
     { expiresIn: '7d' }
   );

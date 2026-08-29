@@ -5,18 +5,18 @@ const FK_VIOLATION = '23503';
 
 const BASE_SELECT = `
   SELECT d.*, u.user_id AS collector_user_id, u.name AS collector_name,
-    u.email AS collector_email, u.phone AS collector_phone
+    u.phone AS collector_phone
   FROM donations d
   LEFT JOIN users u ON u.user_id = d.collected_by
 `;
 
 function shape(row) {
   if (!row) return row;
-  const { collector_user_id, collector_name, collector_email, collector_phone, ...rest } = row;
+  const { collector_user_id, collector_name, collector_phone, ...rest } = row;
   return {
     ...rest,
     collector: collector_user_id
-      ? { user_id: collector_user_id, name: collector_name, email: collector_email, phone: collector_phone }
+      ? { user_id: collector_user_id, name: collector_name, phone: collector_phone }
       : null,
   };
 }

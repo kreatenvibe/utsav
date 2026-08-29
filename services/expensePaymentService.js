@@ -5,18 +5,18 @@ const FK_VIOLATION = '23503';
 
 const BASE_SELECT = `
   SELECT ep.*, u.user_id AS payer_user_id, u.name AS payer_name,
-    u.email AS payer_email, u.phone AS payer_phone
+    u.phone AS payer_phone
   FROM expense_payments ep
   LEFT JOIN users u ON u.user_id = ep.paid_by
 `;
 
 function shape(row) {
   if (!row) return row;
-  const { payer_user_id, payer_name, payer_email, payer_phone, ...rest } = row;
+  const { payer_user_id, payer_name, payer_phone, ...rest } = row;
   return {
     ...rest,
     payer: payer_user_id
-      ? { user_id: payer_user_id, name: payer_name, email: payer_email, phone: payer_phone }
+      ? { user_id: payer_user_id, name: payer_name, phone: payer_phone }
       : null,
   };
 }

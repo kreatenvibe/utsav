@@ -93,7 +93,7 @@ export async function listMyColonies(userId) {
 
 export async function listColonyMembers(colonyId) {
   const { rows } = await pool.query(
-    `SELECT cm.colony_membership_id, cm.user_id, u.name, u.email, u.phone, cm.role, cm.created_at
+    `SELECT cm.colony_membership_id, cm.user_id, u.name, u.phone, cm.role, cm.created_at
      FROM colony_memberships cm
      JOIN users u ON u.user_id = cm.user_id
      WHERE cm.colony_id = $1
@@ -119,14 +119,9 @@ async function isSoleAdmin(colonyId, userId) {
 // resolves to a users row is linked as-is (name/password ignored, never
 // mutating an existing account as a side effect); one that doesn't resolve
 // requires name+password to create a fresh account.
-export async function upsertMembership(colonyId, { name, email, phone, password, role = 'member' }) {
-  if (email && phone) {
-    const err = new Error('provide either email or phone, not both');
-    err.status = 400;
-    throw err;
-  }
-  if (!email && !phone) {
-    const err = new Error('email or phone is required');
+export async function upsertMembership(colonyId, { name, phone, password, role = 'member' }) {
+  if (!phone) {
+    const err = new Error('phone is required');
     err.status = 400;
     throw err;
   }
@@ -136,11 +131,9 @@ export async function upsertMembership(colonyId, { name, email, phone, password,
     throw err;
   }
 
-  const column = email ? 'email' : 'phone';
-  const identifier = email || phone;
   const { rows: existingRows } = await pool.query(
-    `SELECT user_id, name, email, phone FROM users WHERE ${column} = $1`,
-    [identifier]
+    'SELECT user_id, name, phone FROM users WHERE phone = $1',
+    [phone]
   );
 
   let user = existingRows[0];
@@ -161,8 +154,8 @@ export async function upsertMembership(colonyId, { name, email, phone, password,
     }
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
     const { rows } = await pool.query(
-      'INSERT INTO users (name, email, phone, password_hash) VALUES ($1, $2, $3, $4) RETURNING user_id, name, email, phone',
-      [name, email ?? null, phone ?? null, passwordHash]
+      'INSERT INTO users (name, phone, password_hash) VALUES ($1, $2, $3) RETURNING user_id, name, phone',
+      [name, phone, passwordHash]
     );
     user = rows[0];
     account = 'created';
@@ -174,7 +167,7 @@ export async function upsertMembership(colonyId, { name, email, phone, password,
        VALUES ($1, $2, $3) RETURNING colony_membership_id, colony_id, user_id, role, created_at`,
       [colonyId, user.user_id, role]
     );
-    return { ...rows[0], name: user.name, email: user.email, phone: user.phone, account };
+    return { ...rows[0], name: user.name, phone: user.phone, account };
   } catch (err) {
     if (err.code === UNIQUE_VIOLATION) {
       const e = new Error('that user is already a member of this colony');
@@ -208,24 +201,23 @@ export async function bulkAddMembers(colonyId, actingUserId, { file, initial_pas
     const rowNumber = i + 1;
     const row = rows[i];
     const name = row.name?.trim() || null;
-    const email = row.email?.trim() || null;
     const phone = row.phone?.trim() || null;
     const password = row.password?.trim() || initial_password?.trim() || null;
     const role = row.role?.trim() || 'member';
 
     if (!name) {
-      errors.push({ row: rowNumber, email, phone, reason: 'name is required' });
+      errors.push({ row: rowNumber, phone, reason: 'name is required' });
       continue;
     }
 
     try {
-      const membership = await upsertMembership(colonyId, { name, email, phone, password, role });
+      const membership = await upsertMembership(colonyId, { name, phone, password, role });
       created.push({ row: rowNumber, ...membership });
     } catch (err) {
       if (err.status === 409) {
-        skipped.push({ row: rowNumber, email, phone, reason: err.message });
+        skipped.push({ row: rowNumber, phone, reason: err.message });
       } else {
-        errors.push({ row: rowNumber, email, phone, reason: err.message });
+        errors.push({ row: rowNumber, phone, reason: err.message });
       }
     }
   }

@@ -14,13 +14,84 @@ All four numbered build-order layers have routes/services, plus
 donations/expense_payments/expenses (soft) and tasks/availability (hard),
 JWT auth guards all write endpoints, colony-admin is now the only write role
 app-wide (see below — this closes the walk-in-donations/availability/donors
-scoping gap that was previously deferred here), and the `members` table is
-gone (retired in favor of `users` + `colony_memberships`). Next: not yet
-decided — the remaining open candidate is DELETE for
+scoping gap that was previously deferred here), the `members` table is
+gone (retired in favor of `users` + `colony_memberships`), and `email` is
+gone too — phone is now the sole login identifier and self-registration no
+longer exists (see below; this opens a real, flagged gap — there's no API
+path left to create the very first user in a fresh deployment). Next: not
+yet decided — open candidates are DELETE for
 colonies/festivals/donors/expected_donations (still deferred, cascade
-behavior not decided). Ask user before picking.
+behavior not decided) and how the first-account-provisioning gap should
+actually be solved (seed script? ops runbook?). Ask user before picking.
 
 ## Done
+- **Removed `email` entirely from the identity model — phone is now the sole
+  login identifier, self-registration is gone** (database wipe confirmed
+  safe by user — test/seed data only, so this is a destructive,
+  non-backfilled schema change): `migrations/016_drop_email.sql` drops
+  `users_email_or_phone_check`, drops `users.email` (its unique constraint
+  goes with it), drops the partial `users_phone_unique` index, sets
+  `users.phone NOT NULL`, adds a plain `UNIQUE (phone)` constraint. Final
+  `users` shape: `user_id`, `name`, `phone` (required, unique),
+  `password_hash`, `created_at`.
+  **`POST /auth/register` deleted entirely** — not deprecated, removed from
+  `routes/auth.js`; `authService.registerUser` deleted too (no remaining
+  caller). `app.js` needed no change — it only mounts the `/auth` router as
+  a whole, so removing one route inside it leaves no dead reference. An
+  unauthenticated `POST /auth/register` now falls through to the app-wide
+  write gate (401); an authenticated one falls through to Express's default
+  404 (confirmed via a new test, since nothing in this app has ever had an
+  explicit catch-all 404 handler).
+  **`POST /auth/login`** simplified to `{ phone, password }` only — the
+  email/phone exactly-one-of branching from migration 012 is gone with it.
+  400 `"phone and password are required"` if either is missing. JWT payload
+  is now `{ user_id, phone }`.
+  **Colony membership add (single + bulk)** simplified the same way:
+  `POST /colonies/:id/members` body is `{ name, phone, password?, role? }`
+  — `phone` always required, no more exactly-one-of logic (400
+  `"phone is required"` if missing). Same create-or-link semantics
+  unchanged otherwise. Bulk CSV/XLSX columns drop `email` entirely (`name`,
+  `phone`, `password`, `role`). Response shapes (`AddMemberResult`, bulk
+  created/skipped/errors rows) drop `email`, keep `phone`.
+  `GET /users?search=` matches `name`/`phone` only now, response is
+  `[{ user_id, name, phone }]`. `GET /colonies/:id/members` drops `email`
+  too.
+  **Consequential — not explicitly requested, but required so the column
+  drop doesn't break existing queries**: `donationService`,
+  `expensePaymentService`, `taskAssignmentService`, `availabilityService`
+  all `SELECT u.email` to inline `collector`/`payer`/`user` objects on their
+  GET responses — all four lost the `email` field from those inlined
+  objects (`{ user_id, name, phone }` / `{ name, phone }`, same shape minus
+  `email`).
+  **Flagged, not fixed — a real gap this change opens**: with
+  self-registration gone, there is no API path left to create the very
+  first `users` row in a fresh deployment (`POST /colonies/:id/members`
+  needs an existing colony admin; `POST /colonies` needs an existing
+  authenticated user). The first account now has to be provisioned directly
+  against the database, outside the API — flagged in
+  `docs/BACKEND_ANALYSIS.md` §3/§5/§12 rather than silently worked around.
+  Test suite: `test/usersPhoneLogin.test.js` deleted (it was entirely about
+  the retired email/phone dual-login and email-column bulk-import behavior;
+  its one still-relevant case — a bulk-import phone row logging in
+  successfully — already existed in `test/bulkImport.test.js`).
+  `test/colonyMembership.test.js` and `test/bulkImport.test.js` rewritten:
+  since there's no more `POST /auth/register` to bootstrap a test user with,
+  both files' shared helper now inserts a `users` row directly (bcrypt-hash
+  a known password) then logs in via `POST /auth/login` — mirroring the
+  real first-admin-provisioning gap above rather than working around it.
+  All 17 tests pass (16 rewritten/pre-existing + 1 new, confirming
+  `POST /auth/register` truly 404s for an authenticated caller — while
+  unauthenticated it's a 401 from the write gate, worth knowing if anyone
+  goes looking for it). Manually verified via the test suite against the
+  local docker Postgres (`.env` swapped, `npm run migrate` applied
+  `016_drop_email.sql` cleanly, `npm test`, `.env` restored to the Render
+  line afterward — same swap-and-restore convention as every prior
+  session). `docs/BACKEND_ANALYSIS.md` updated throughout, not just
+  §3/§4/§5/§7 as requested — email/register mentions in §1, §2, §6, §8, §9,
+  §10, §11, §12 were also stale and would have misled a reader otherwise;
+  §11/§12 specifically gained the bootstrapping-gap observation and note
+  that the migration-014 placeholder-account concern is now moot (no
+  production data survived the wipe).
 - **Retired `members`; unified all person-attribution on `users` +
   `colony_memberships`; made colony-admin the only write role app-wide**
   (design/decision doc at the Claude plan path `typed-sparking-fox.md`, not

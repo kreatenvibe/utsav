@@ -4,15 +4,15 @@ import { colonyIdForTask, assertColonyAdmin } from './colonyMembershipService.js
 const FK_VIOLATION = '23503';
 
 const BASE_SELECT = `
-  SELECT ta.*, u.name AS user_name, u.email AS user_email, u.phone AS user_phone
+  SELECT ta.*, u.name AS user_name, u.phone AS user_phone
   FROM task_assignments ta
   JOIN users u ON u.user_id = ta.user_id
 `;
 
 function shape(row) {
   if (!row) return row;
-  const { user_name, user_email, user_phone, ...rest } = row;
-  return { ...rest, user: { name: user_name, email: user_email, phone: user_phone } };
+  const { user_name, user_phone, ...rest } = row;
+  return { ...rest, user: { name: user_name, phone: user_phone } };
 }
 
 export async function createTaskAssignment({ task_id, user_id }, actingUserId) {

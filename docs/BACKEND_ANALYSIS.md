@@ -4,6 +4,8 @@
 
 *Note: `UI_UX_FUNCTIONAL_SPEC.md` in the repo root is a related, very detailed document but it predates migration `009_colony_memberships.sql` — it still describes "one role, no per-colony scoping." That is now out of date. This document reflects the current code, including colony membership and per-colony write permissions.*
 
+*Also out of date as of migration `016_drop_email.sql`: any prior description of `email`-based login/registration. There is no `email` column, no `POST /auth/register`, and no self-registration path anymore — see §3/§4/§5 below.*
+
 ---
 
 ## 1. Understand the Product
@@ -12,9 +14,9 @@
 
 **Expected users:** Festival organizers (the people who create colonies, festivals, log donations/expenses, assign tasks). There is currently no volunteer-facing or donor-facing login — volunteers and donors exist only as data records referenced by organizers.
 
-**User roles that exist in the code today (as of migration 015 — `members` is retired, colony-admin is the only write role):**
+**User roles that exist in the code today (as of migration 016 — `email` is gone, phone is the only login identifier, and self-registration no longer exists on top of migration 015's `members` retirement and colony-admin-only write model):**
 - **Unauthenticated visitor** — can read (GET) everything, no login needed.
-- **Registered user** — logging in alone grants no write access anywhere except creating a colony (which auto-admins the creator).
+- **Registered user** — logging in alone grants no write access anywhere except creating a colony (which auto-admins the creator). Every account is created by a colony admin (`POST /colonies/:id/members` or its bulk variant) — there is no self-registration.
 - **Colony admin of at least one colony** — the gate for donors, walk-in donations, and availability (none of which have a specific colony to check against — see §5).
 - **Colony admin of a specific colony** (`colony_memberships.role = 'admin'`) — the gate for every colony-owned write: festivals, pledges, donations tied to a pledge, expenses, expense payments, tasks, task assignments, and colony membership add/remove/promote/reset-password. Also edits the colony's own `name`/`location`. The colony creator is auto-admined. A colony can never be left with zero admins (enforced in code).
 - There is no plain "colony member" write role anymore — being `role = 'member'` grants no write access beyond what any authenticated user already has; it exists only to record who belongs to a colony (visible via `GET /colonies/mine`/`GET /colonies/:id/members`).
@@ -62,7 +64,7 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 - **Services** ([services/](services/)) — one file per resource, all business logic and every SQL query. Functions throw plain `Error` objects with a `.status` property (e.g. `err.status = 404`) which the central error handler reads.
 - **Models/Database layer:** No ORM. Raw SQL via the `pg` driver, called directly from services. [db/pool.js](db/pool.js) exports a single shared `pg.Pool`. Notably patches the `DATE` (oid 1082) type parser to return the raw `'YYYY-MM-DD'` string instead of a JS `Date`, to avoid a timezone-shift bug when serializing to JSON.
 - **Migrations:** [db/migrate.js](db/migrate.js) is a small hand-rolled migration runner (no framework like Knex/Sequelize/Prisma) — reads `.sql` files from [migrations/](migrations/) in filename order, tracks applied ones in a `schema_migrations` table, wraps each file in `BEGIN/COMMIT/ROLLBACK`. Run via `npm run migrate`.
-- **Middleware:** [middleware/auth.js](middleware/auth.js) — `requireAuth` verifies a `Bearer` JWT and attaches `req.user = { user_id, email, phone }` (migration 012 — `email`/`phone` may individually be `null` depending which identifier was used to log in). Applied globally to all mutating verbs in `app.js`, and additionally applied explicitly on GET routes that expose other users' data: two in `routes/colonies.js` (`/mine`, `/:id/members`) and `GET /users` in `routes/users.js`.
+- **Middleware:** [middleware/auth.js](middleware/auth.js) — `requireAuth` verifies a `Bearer` JWT and attaches `req.user = { user_id, phone }` (migration 016 — `email` is gone from both the schema and the token; `phone` is always present, never `null`, since it's the sole required login identifier now). Applied globally to all mutating verbs in `app.js`, and additionally applied explicitly on GET routes that expose other users' data: two in `routes/colonies.js` (`/mine`, `/:id/members`) and `GET /users` in `routes/users.js`.
 - **Authorization:** [services/colonyMembershipService.js](services/colonyMembershipService.js) — not a route-level middleware but a set of service-layer helper functions (`assertColonyAdmin`, `assertAdminOfAnyColony`, and per-resource `colonyIdFor*` resolvers) that every mutating service calls before writing.
 - **Validation:** No schema library (no Joi/Zod/express-validator). Manual `if (!field) throw` checks at the top of each service function, plus reliance on Postgres constraints (`NOT NULL`, `CHECK`, FK) as a second line of defense, with Postgres error codes (`23503` FK violation, `23505` unique violation, `23514` check violation) caught and translated into friendly 400/409 messages.
 - **Error handling:** One centralized Express error-handling middleware at the bottom of `app.js`: `res.status(err.status || 500).json({ error: err.message })`. All routes forward failures via `next(err)`.
@@ -77,16 +79,17 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 
 ## 3. Database & Data Model
 
-**Technology:** PostgreSQL, accessed via the `pg` driver with no ORM. Schema built up across 15 migration files. **Migration 015 dropped `members` entirely** — every table that used to reference it now references `users` directly. This section describes the schema as of migration 015.
+**Technology:** PostgreSQL, accessed via the `pg` driver with no ORM. Schema built up across 16 migration files. **Migration 015 dropped `members` entirely** — every table that used to reference it now references `users` directly. **Migration 016 dropped `users.email` entirely** — phone is now the sole login identifier, and self-registration (`POST /auth/register`) is gone along with it. This section describes the schema as of migration 016.
 
 ### Entities
 
-**users** (`migrations/008`, extended `migrations/012`, `013`)
-- `user_id` (PK, serial), `name` (**required**, added migration 013 — backfilled on existing rows to `COALESCE(email, phone)`), `email` (**nullable** as of migration 012, unique when present), `phone` (**nullable**, added migration 012, unique when present via a partial index), `password_hash` (required, bcrypt), `created_at` (auto).
-- **CHECK (email IS NOT NULL OR phone IS NOT NULL)** (migration 012) — a login identity needs at least one identifier. Both are optional individually; at least one is mandatory.
+**users** (`migrations/008`, extended `migrations/012`, `013`, `016`)
+- `user_id` (PK, serial), `name` (required, added migration 013), `phone` (**required as of migration 016**, unique — a plain `UNIQUE` constraint, replacing migration 012's partial index now that it's no longer nullable), `password_hash` (required, bcrypt), `created_at` (auto).
+- **`email` no longer exists as a column** (migration 016 dropped it, along with the `users_email_or_phone_check` CHECK it was part of — phone alone is simply `NOT NULL` now). This was a destructive, non-backfilled schema change — confirmed with the user that the database held only test/seed data, so migration 016 doesn't attempt to preserve or migrate any prior `email` values.
 - Purpose: login identity **and** the volunteer/organizer identity — as of migration 015 there is no separate `members` table. Every colony member, task-assignment signup, and availability row now points straight at `users`.
-- **Ways to get a `users` row**: `POST /auth/register` (email+password+name, self-registration only, never phone-based), `POST /colonies/:id/members` and `POST /colonies/:id/members/bulk` (create-or-link — creates a new row when the given email/phone doesn't already resolve to one, see §4/§6), and migration 014's one-time backfill (placeholder accounts for pre-migration `members` rows that had signups/availability but no login — see the migration file's own comments; these have an unusable random password until an admin resets it).
+- **Ways to get a `users` row**: exclusively `POST /colonies/:id/members` and `POST /colonies/:id/members/bulk` (create-or-link — creates a new row when the given phone doesn't already resolve to one, see §4/§6) — there is no other creation path. **`POST /auth/register` no longer exists** (migration 016) — self-registration has been removed entirely; every account is created by a colony admin. (Migration 014's one-time backfill of placeholder accounts for pre-`members`-retirement rows is historical and no longer a live creation path.)
 - No update/delete endpoints exist for `users` themselves beyond `PATCH /auth/change-password` (self-service) and the colony-admin-only `POST /colonies/:id/members/:userId/reset-password`. `GET /users?search=` is the only read/search endpoint.
+- **Bootstrapping consequence, flagged in §12**: with self-registration gone, there is no API path to create the very first user account at all — `POST /colonies/:id/members` requires being a colony admin already, and `POST /colonies` requires being an authenticated user already. The first account in any deployment has to be provisioned directly against the database (a one-off insert with a bcrypt hash), not through the API.
 
 **colony_memberships** (`migrations/009`)
 - `colony_membership_id` (PK), `colony_id` (FK → colony), `user_id` (FK → users), `role` (`'admin'`|`'member'`, default `'member'`, CHECK-enforced), `created_at`.
@@ -112,7 +115,7 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 **donations** (actual payment against a pledge, or a walk-in gift)
 - `donation_id` (PK), `donor_id` (FK, required), `expected_id` (FK, **nullable** — null means a walk-in gift with no pledge), `amount` (required, frozen after insert), `date` (required, plain DATE), `collected_by` (FK → **users** as of migration 015, nullable, attribution only), `deleted_at` (soft-delete marker, migration 007).
 - No PATCH endpoint exists at all — `amount` truly cannot be edited once created.
-- GET responses inline the collector as `collector: { user_id, name, email, phone } | null` alongside the raw `collected_by` id (see §4).
+- GET responses inline the collector as `collector: { user_id, name, phone } | null` alongside the raw `collected_by` id (`email` dropped in migration 016, see §4).
 
 **expenses** (planned cost)
 - `expense_id` (PK), `festival_id` (FK, required), `purpose` (optional), `vendor_name` (optional, free text — not a linked entity), `amount_planned` (required, editable estimate), `status` (`'open'`|`'settled'`, default `'open'`), `deleted_at` (soft-delete).
@@ -120,7 +123,7 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 
 **expense_payments** (actual payment against an expense)
 - `payment_id` (PK), `expense_id` (FK, required), `amount` (required, frozen), `date` (required), `paid_by` (FK → **users** as of migration 015, nullable, attribution only), `deleted_at` (soft-delete).
-- No PATCH endpoint at all. GET responses inline the payer as `payer: { user_id, name, email, phone } | null` (see §4).
+- No PATCH endpoint at all. GET responses inline the payer as `payer: { user_id, name, phone } | null` (`email` dropped in migration 016, see §4).
 
 **tasks**
 - `task_id` (PK), `festival_id` (FK, required), `title` (required), `planned_date` (optional DATE), `labor_required` (optional integer — a target headcount, purely informational, never enforced), `status` (`'planned'`|`'in_progress'`|`'done'`, DB CHECK-enforced, default `'planned'`).
@@ -128,11 +131,11 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 
 **task_assignments** (junction: a volunteer signed up for a task)
 - `assignment_id` (PK), `task_id` (FK, required), `user_id` (FK → **users**, required, renamed from `member_id` in migration 015), `signed_up_at` (auto timestamp).
-- No status/role/day fields — an informal signup, but as of this change **only a colony admin can create or cancel one** (not self-service — see §5). Hard-deleted. No PATCH. GET responses inline `user: { name, email, phone }`.
+- No status/role/day fields — an informal signup, but only a colony admin can create or cancel one (not self-service — see §5). Hard-deleted. No PATCH. GET responses inline `user: { name, phone }` (`email` dropped in migration 016).
 
 **availability**
 - `availability_id` (PK), `user_id` (FK → **users**, required, renamed from `member_id` in migration 015), `date` (required, identity field — not editable), `is_available` (required boolean, the only PATCH-able field).
-- Date-level only, no time-of-day granularity. Hard-deleted. GET responses inline `user: { name, email, phone }`.
+- Date-level only, no time-of-day granularity. Hard-deleted. GET responses inline `user: { name, phone }` (`email` dropped in migration 016).
 
 ### Relationship overview
 
@@ -166,12 +169,11 @@ Base URL has no global prefix (e.g. routes are mounted directly at `/colonies`, 
 
 | Method | Endpoint | Purpose | Auth |
 |---|---|---|---|
-| POST | `/auth/register` | Create a user account | — |
 | POST | `/auth/login` | Log in, get a JWT | — |
 | PATCH | `/auth/change-password` | Self-service password change | 🔒 |
 
-- **Register** body: `{ name, email, password }` (`name` newly required by this change). Response `201`: `{ user_id, name, email }` (no password hash, no token). 400 if any field missing. 409 if email already registered. Self-registration is deliberately email+password only — no `POST /auth/register` path to a phone-only account. Phone-based logins are created via `POST /colonies/:id/members`/`/bulk` (see Colonies above) or the migration-014 backfill.
-- **Login** body: `{ email, password }` **or** `{ phone, password }` (migration 012 — exactly one identifier, not both). Response `200`: `{ token }` (JWT, 7-day expiry). 400 if `password` is missing, or if neither `email` nor `phone` is given. 400 if **both** `email` and `phone` are given ("provide either email or phone, not both" — ambiguous on purpose, the API won't silently prefer one). 401 for wrong password or unknown identifier (email *or* phone) — identical `"invalid credentials"` message in every case, by design (doesn't leak which emails/phones are registered). JWT payload is now `{ user_id, email, phone }`; whichever field wasn't used to log in comes back `null`.
+- **`POST /auth/register` no longer exists** (migration 016) — a `POST` to it now falls through to the app-wide write gate (401 unauthenticated, 404 if authenticated — no route matches). There is no self-registration path of any kind; every `users` row is created by a colony admin via `POST /colonies/:id/members` or its bulk variant (see Colonies below).
+- **Login** body: `{ phone, password }` only (migration 016 dropped the email/phone exactly-one-of branching along with `email` itself). Response `200`: `{ token }` (JWT, 7-day expiry). 400 if `phone` or `password` is missing. 401 for wrong password or unknown phone — identical `"invalid credentials"` message in both cases, by design (doesn't leak which phone numbers are registered). JWT payload is `{ user_id, phone }` (no `email`, no `name`).
 - **Change password** body: `{ current_password, new_password }`. Response `204`, no body. 400 if either field missing. 401 if `current_password` doesn't match. This is a **private** password change — independent of any shared/organizer-set password a member may have been given (see Members below); it doesn't require or reference a member's `user_id` link at all, just the caller's own JWT identity.
 
 ### Users (directory / search)
@@ -180,9 +182,9 @@ Base URL has no global prefix (e.g. routes are mounted directly at `/colonies`, 
 |---|---|---|---|
 | GET | `/users?search=` | Search/browse registered users | 🔒 (always, even though it's a GET) |
 
-- Added specifically so a colony admin can find a registered user's exact `email`/`phone` before calling `POST /colonies/:id/members` — though as of this change that endpoint no longer 404s on a miss (see Colonies below), this is still the picker for "link an existing account."
-- `search` is optional. Omit it and the endpoint returns every registered user (same always-a-full-list convention as every other GET in this API — still no pagination). Given, it matches **partial, case-insensitive against `name` OR `email` OR `phone`** (name added in this change, alongside the existing email/phone match from migration 012).
-- Response is `[{ user_id, name, email, phone }]` (`name` added in this change) — never `password_hash`, never any other column. Either `email` or `phone` may be `null` on a given row; `name` is never null.
+- Added specifically so a colony admin can find a registered user's exact `phone` before calling `POST /colonies/:id/members` — that endpoint doesn't 404 on a miss (see Colonies below), so this is the picker for "link an existing account" vs. "this phone isn't registered yet, create a new one."
+- `search` is optional. Omit it and the endpoint returns every registered user (same always-a-full-list convention as every other GET in this API — still no pagination). Given, it matches **partial, case-insensitive against `name` OR `phone`** (`email` match removed in migration 016, since the column is gone).
+- Response is `[{ user_id, name, phone }]` (`email` dropped in migration 016) — never `password_hash`, never any other column. `name` and `phone` are both always present, never null.
 - Requires auth on the GET, same reasoning as `/colonies/mine` and `/colonies/:id/members` below: an unauthenticated user-search endpoint would let anyone enumerate registered accounts.
 
 ### Colonies
@@ -194,7 +196,7 @@ Base URL has no global prefix (e.g. routes are mounted directly at `/colonies`, 
 | GET | `/colonies/mine` | List colonies the caller belongs to, with their role | 🔒 (always, even though it's a GET) |
 | GET | `/colonies/:id` | Colony detail | — |
 | PATCH | `/colonies/:id` | Edit name/location | 🔒, colony-admin only |
-| GET | `/colonies/:id/members` | List a colony's members (name + email/phone + role) | 🔒 (always) |
+| GET | `/colonies/:id/members` | List a colony's members (name + phone + role) | 🔒 (always) |
 | POST | `/colonies/:id/members` | Create-or-link a user, add them to the colony | 🔒, colony-admin only |
 | POST | `/colonies/:id/members/bulk` | Create-or-link many from a CSV/XLSX file | 🔒, colony-admin only |
 | PATCH | `/colonies/:id/members/:userId` | Change a member's role | 🔒, colony-admin only |
@@ -206,24 +208,24 @@ Base URL has no global prefix (e.g. routes are mounted directly at `/colonies`, 
 - Note: `/colonies/mine` must be registered before `/colonies/:id` in the router (it is) or Express would treat "mine" as an `:id` value.
 - `?search=` (new) matches partial, case-insensitive against `name` OR `location`. Optional and additive — omit it and the response is the full list, unchanged.
 
-**Add member — now create-or-link, not add-only** (`POST /colonies/:id/members`, body shape changed): `{ name, email?, phone?, password?, role? }`. Exactly one of `email`/`phone` is required (400 `"provide either email or phone, not both"` / `"email or phone is required"`, mirroring `POST /auth/login`'s own exactly-one-of validation). If the identifier already resolves to an existing `users` row, that account is **linked** as-is — `name`/`password` in the body are ignored entirely, never mutating an existing account as a side effect. If it doesn't resolve, a new account is **created** — `name` and `password` become required (400 if either is missing), then linked. **There is no more 404 "no registered user with that email"** — every call either links or creates. 409 unchanged if the resolved (or newly created) user is already a member of this colony. Response `201`:
+**Add member — create-or-link, not add-only** (`POST /colonies/:id/members`): `{ name, phone, password?, role? }`. `phone` is always required (migration 016 dropped the email/phone exactly-one-of logic entirely — 400 `"phone is required"` if missing). If the phone already resolves to an existing `users` row, that account is **linked** as-is — `name`/`password` in the body are ignored entirely, never mutating an existing account as a side effect. If it doesn't resolve, a new account is **created** — `name` and `password` become required (400 if either is missing), then linked. There is no 404 "not registered" — every call either links or creates. 409 unchanged if the resolved (or newly created) user is already a member of this colony. Response `201`:
 ```json
 {
   "colony_membership_id": 9, "colony_id": 3, "user_id": 12, "role": "member",
-  "created_at": "...", "name": "...", "email": "...", "phone": null, "account": "created"
+  "created_at": "...", "name": "...", "phone": "...", "account": "created"
 }
 ```
 `account` is `"created"` or `"linked"` — tells the caller (and a bulk-import review screen) which happened.
 
-**Bulk add members** (`POST /colonies/:id/members/bulk`) — `multipart/form-data`: a `file` field (`.csv`/`.xlsx`/`.xls`, 5MB cap) plus an optional form field `initial_password`. Admin-of-`:id` is checked **once** up front for the whole request, not per row. File columns: `name` (**required per row**, even on a row that ends up linking — the value is simply ignored in that case), `email` (optional), `phone` (optional — exactly one of `email`/`phone` required per row), `password` (optional, falls back to the batch's `initial_password` field, which is itself only required if some row actually needs it to create a new account), `role` (optional, defaults `'member'`). Each row runs the exact same create-or-link logic as single-add. Response `201`:
+**Bulk add members** (`POST /colonies/:id/members/bulk`) — `multipart/form-data`: a `file` field (`.csv`/`.xlsx`/`.xls`, 5MB cap) plus an optional form field `initial_password`. Admin-of-`:id` is checked **once** up front for the whole request, not per row. File columns: `name` (**required per row**, even on a row that ends up linking — the value is simply ignored in that case), `phone` (**required per row**, migration 016 dropped the `email` column entirely), `password` (optional, falls back to the batch's `initial_password` field, which is itself only required if some row actually needs it to create a new account), `role` (optional, defaults `'member'`). Each row runs the exact same create-or-link logic as single-add. Response `201`:
 ```json
 {
-  "created": [{ "row": 1, "colony_membership_id": 9, "colony_id": 3, "user_id": 12, "role": "member", "created_at": "...", "name": "...", "email": "...", "phone": null, "account": "created" }],
-  "skipped": [{ "row": 2, "email": "...", "phone": null, "reason": "that user is already a member of this colony" }],
-  "errors":  [{ "row": 3, "email": null, "phone": "...", "reason": "password is required to create a new account" }]
+  "created": [{ "row": 1, "colony_membership_id": 9, "colony_id": 3, "user_id": 12, "role": "member", "created_at": "...", "name": "...", "phone": "...", "account": "created" }],
+  "skipped": [{ "row": 2, "phone": "...", "reason": "that user is already a member of this colony" }],
+  "errors":  [{ "row": 3, "phone": "...", "reason": "password is required to create a new account" }]
 }
 ```
-`row` is 1-based, data rows only. `skipped` = already a member (unchanged concept). `errors` = missing `name`; missing/both identifiers; a new-account row missing `password` (and no `initial_password` fallback); bad `role`. Top-level 400 if no file; 404 if `:id` doesn't resolve to a colony; 403 if the caller isn't that colony's admin.
+`row` is 1-based, data rows only. `skipped` = already a member (unchanged concept). `errors` = missing `name`; missing `phone`; a new-account row missing `password` (and no `initial_password` fallback); bad `role`. Top-level 400 if no file; 404 if `:id` doesn't resolve to a colony; 403 if the caller isn't that colony's admin.
 
 **Reset a member's password** (`POST /colonies/:id/members/:userId/reset-password`, new — replaces the retired `POST /members/:id/reset-password`) body: `{ password }`. 400 if `password` missing. 404 if `:userId` isn't a member of `:id`. Response `200`: `{ user_id }`. No current-password check — this is an admin override for a member who forgot their password, not self-service (`PATCH /auth/change-password` is the self-service path, unchanged).
 
@@ -280,7 +282,7 @@ Create body: `{ donor_id, festival_id, expected_amount, year, purpose? }`, first
 | GET | `/donations/:id` | Detail | — |
 | DELETE | `/donations/:id` | Soft delete | 🔒, same gate as create |
 
-Create body: `{ donor_id, expected_id?, amount, date, collected_by? }`. No PATCH exists — `amount` is frozen. `collected_by` is now an optional `users.user_id` (was `members.member_id`). GET responses inline `collector: { user_id, name, email, phone } | null` alongside the raw `collected_by`.
+Create body: `{ donor_id, expected_id?, amount, date, collected_by? }`. No PATCH exists — `amount` is frozen. `collected_by` is now an optional `users.user_id` (was `members.member_id`). GET responses inline `collector: { user_id, name, phone } | null` alongside the raw `collected_by` (`email` dropped in migration 016).
 
 ### Expenses
 
@@ -303,7 +305,7 @@ Create body: `{ festival_id, purpose?, vendor_name?, amount_planned }`. `status`
 | GET | `/expense-payments/:id` | Detail | — |
 | DELETE | `/expense-payments/:id` | Soft delete | 🔒, colony admin |
 
-Create body: `{ expense_id, amount, date, paid_by? }`. No PATCH. `paid_by` is now an optional `users.user_id` (was `members.member_id`). GET responses inline `payer: { user_id, name, email, phone } | null` alongside the raw `paid_by`.
+Create body: `{ expense_id, amount, date, paid_by? }`. No PATCH. `paid_by` is now an optional `users.user_id` (was `members.member_id`). GET responses inline `payer: { user_id, name, phone } | null` alongside the raw `paid_by` (`email` dropped in migration 016).
 
 ### Tasks
 
@@ -326,7 +328,7 @@ Create body: `{ festival_id, title, planned_date?, labor_required? }`. `status` 
 | GET | `/task-assignments/:id` | Detail | — |
 | DELETE | `/task-assignments/:id` | Cancel a signup | 🔒, colony admin |
 
-Create body: `{ task_id, user_id }` (renamed from `member_id`). No PATCH — nothing on a signup is editable. **This is no longer self-service** — signing up (or cancelling) now requires the *caller* to be a colony admin, not the person being signed up; an ordinary colony member can no longer sign themselves up (see §5). GET responses inline `user: { name, email, phone }` alongside the raw `user_id`.
+Create body: `{ task_id, user_id }` (renamed from `member_id`). No PATCH — nothing on a signup is editable. This is not self-service — signing up (or cancelling) requires the *caller* to be a colony admin, not the person being signed up; an ordinary colony member cannot sign themselves up (see §5). GET responses inline `user: { name, phone }` alongside the raw `user_id` (`email` dropped in migration 016).
 
 ### Availability
 
@@ -338,9 +340,9 @@ Create body: `{ task_id, user_id }` (renamed from `member_id`). No PATCH — not
 | PATCH | `/availability/:id` | Flip `is_available` only | 🔒, must be an admin of at least one colony |
 | DELETE | `/availability/:id` | Hard delete | 🔒, must be an admin of at least one colony |
 
-Create body: `{ user_id, date, is_available }` (renamed from `member_id`), all required; `is_available` must be a JS boolean (400 otherwise). `availability` has no FK path to a specific colony, so — like donors — the gate is admin-of-*any*-colony, not a specific colony's admin (see §5). This is a real behavior change from before: previously any authenticated user could write their own availability; now only a colony admin can write anyone's. GET responses inline `user: { name, email, phone }` alongside the raw `user_id`.
+Create body: `{ user_id, date, is_available }` (renamed from `member_id`), all required; `is_available` must be a JS boolean (400 otherwise). `availability` has no FK path to a specific colony, so — like donors — the gate is admin-of-*any*-colony, not a specific colony's admin (see §5). This is a real behavior change from before: previously any authenticated user could write their own availability; now only a colony admin can write anyone's. GET responses inline `user: { name, phone }` alongside the raw `user_id` (`email` dropped in migration 016).
 
-**No pagination and no sort-order control anywhere in the API** — every list is `ORDER BY <primary key> ASC` with no override. Filtering is exact-match everywhere **except** four endpoints with a partial, case-insensitive `?search=`: `GET /users?search=` (name/email/phone), `GET /donors?search=` (name/phone), `GET /colonies?search=` (name/location). No other endpoint has free-text search. (`GET /members?search=` no longer exists — `members` was retired.)
+**No pagination and no sort-order control anywhere in the API** — every list is `ORDER BY <primary key> ASC` with no override. Filtering is exact-match everywhere **except** four endpoints with a partial, case-insensitive `?search=`: `GET /users?search=` (name/phone), `GET /donors?search=` (name/phone), `GET /colonies?search=` (name/location). No other endpoint has free-text search. (`GET /members?search=` no longer exists — `members` was retired.)
 
 ---
 
@@ -348,25 +350,27 @@ Create body: `{ user_id, date, is_available }` (renamed from `member_id`), all r
 
 **Mechanism:** Stateless JWT, signed with `JWT_SECRET`, 7-day expiry, no refresh token.
 
-- **Registration** (`POST /auth/register`): name + email + password (`name` added in this change — previously email+password only), bcrypt-hashed (`bcryptjs`, 10 salt rounds) via `authService.registerUser`. No email verification, no roles selection.
-- **Login** (`POST /auth/login`): returns `{ token }` only — no user profile info in the response body.
+- **Registration: removed entirely (migration 016).** `POST /auth/register` no longer exists — there is no self-registration path of any kind. Every `users` row is created by a colony admin via `POST /colonies/:id/members` or its bulk variant (§4), never by the account holder themselves. `services/authService.js`'s `registerUser` function was deleted along with the route (no remaining caller).
+- **Login** (`POST /auth/login`): `{ phone, password }`, returns `{ token }` only — no user profile info in the response body.
 - **Logout:** Not implemented server-side (stateless JWT — client just discards the token). No token blacklist/revocation.
-- **Token contents:** `{ user_id, email, phone }` (migration 012 — `email`/`phone` may individually be `null`, depending which identifier the account has and which one was used to log in) plus standard JWT claims (`iat`, `exp`). `name` is not in the token — fetch it via `GET /users?search=` or `GET /colonies/:id/members` if needed client-side.
+- **Token contents:** `{ user_id, phone }` (migration 016 dropped `email` from the payload along with the column) plus standard JWT claims (`iat`, `exp`). `phone` is always present — never `null`, since it's the sole required login identifier now. `name` is not in the token — fetch it via `GET /users?search=` or `GET /colonies/:id/members` if needed client-side.
 - **Token verification:** `middleware/auth.js`'s `requireAuth` — reads `Authorization: Bearer <token>`, verifies with `jsonwebtoken`, 401 on missing header, malformed header, invalid signature, or expired token. Sets `req.user`.
-- **Password reset:** No "forgot password" self-service flow — no email/SMS, no token, no unauthenticated reset path. Two authenticated alternatives exist: a logged-in user can change their own password (`PATCH /auth/change-password`, requires the current password), and a colony admin can reset a member's password directly (`POST /colonies/:id/members/:userId/reset-password`, no current-password check — this is an admin override, not self-service; replaces the retired `POST /members/:id/reset-password`).
-- **User profile:** No `GET /me` or profile endpoint exists at all. The only way to learn the current user's `user_id`/`email`/`phone` is what was embedded in the JWT at login (decode client-side) or infer via `/colonies/mine`.
-- **Login identifiers (migration 012):** `users.email` and `users.phone` are each individually optional (a `CHECK` requires at least one), so `POST /auth/login` takes exactly one of `email`/`phone` plus `password` — see §4. `POST /auth/register` remains email+password (+name) only; a `users` row only ever gets a `phone` via the colony-member create-or-link path (§4) or the migration-014 backfill.
-- **Global gate:** In `app.js`, every `POST`/`PUT`/`PATCH`/`DELETE` request across the whole app requires a valid JWT (applied *after* `/auth` is mounted, so register/login stay open). All `GET` requests are public with no exceptions **except** `/colonies/mine`, `/colonies/:id/members`, and `/users`, which explicitly require auth even though they're GETs (because they expose other users' emails).
+- **Password reset:** No "forgot password" self-service flow — no email/SMS, no token, no unauthenticated reset path (this remains true post-migration-016; there was never an email-based reset flow to remove). Two authenticated alternatives exist: a logged-in user can change their own password (`PATCH /auth/change-password`, requires the current password), and a colony admin can reset a member's password directly (`POST /colonies/:id/members/:userId/reset-password`, no current-password check — this is an admin override, not self-service).
+- **User profile:** No `GET /me` or profile endpoint exists at all. The only way to learn the current user's `user_id`/`phone` is what was embedded in the JWT at login (decode client-side) or infer via `/colonies/mine`.
+- **Login identifiers (migration 016):** `users.phone` is the sole login identifier — required and unique — so `POST /auth/login` always takes `{ phone, password }`, no branching. There is no other way for a `users` row to come into existence than the colony-member create-or-link path (§4); `email` does not exist anywhere in the schema.
+- **Global gate:** In `app.js`, every `POST`/`PUT`/`PATCH`/`DELETE` request across the whole app requires a valid JWT (applied *after* `/auth` is mounted, so login stays open). All `GET` requests are public with no exceptions **except** `/colonies/mine`, `/colonies/:id/members`, and `/users`, which explicitly require auth even though they're GETs (because they expose other users' phone numbers). `app.js` itself needed no code change for the register removal — it only mounts the `/auth` router as a whole, so deleting one route inside that router leaves no dead reference; an unauthenticated `POST /auth/register` now falls through to the global write gate (401), and an authenticated one falls through to Express's default 404 (no route matches in any router).
+- **Bootstrapping gap, flagged (not resolved by this change):** with self-registration gone, there is no API path to create the very first `users` row in a fresh deployment — `POST /colonies/:id/members` requires an existing colony admin, and `POST /colonies` requires an existing authenticated user. The first account has to be provisioned directly against the database (a one-off insert with a bcrypt hash), outside the API. See also §12.
 - **Roles/permissions beyond colony membership:** None system-wide — every registered user can create a colony and become its admin. Within a colony, `role = 'member'` no longer carries any write privilege of its own (see below) — the only roles that matter for authorization purposes are "colony admin of a specific colony" and "colony admin of at least one colony."
 - **Authorization — colony-admin is the only write role, app-wide (this change).** Previously, most colony-descended writes only required `assertColonyMember` (any member could write); this is now `assertColonyAdmin` everywhere: `festivals`, `expected_donations`, `donations` (when tied to a pledge via `expected_id`), `expenses`, `expense_payments`, `tasks`, `task_assignments`, and colony membership add/remove/promote/reset-password. `donors`, walk-in `donations` (no `expected_id`), and `availability` have no FK path to a specific colony at all, so they use a new, looser gate — `assertAdminOfAnyColony(userId)` (`colonyMembershipService.js`) — true if the user is `role = 'admin'` on *any* `colony_memberships` row, regardless of which colony. This closes a gap flagged across three prior sessions (PROGRESS.md) where those three resources were writable by any authenticated user with no colony check at all. **Reasoning for extending rather than leaving them unscoped**: the task driving this change was explicitly "colony-admin the only write role app-wide" — leaving three resources as the sole exceptions would have reproduced the exact inconsistency being fixed. **Mobile consequence**: the Donors screens and the Walk-in Donation screen need a "current user is admin of ≥1 colony" gate before showing their write actions — derivable client-side from `GET /colonies/mine` (any row with `role: "admin"`), no new endpoint needed.
 - **Task assignments are no longer self-service.** Signing up for a task (`POST /task-assignments`) and cancelling a signup (`DELETE /task-assignments/:id`) now require the *caller* to be a colony admin of the task's colony — not the person being signed up. An ordinary colony member can no longer add themselves to a task; only an admin enrolls volunteers. This is a deliberate product change made as part of the app-wide admin-only rule above, called out explicitly here because it's easy to miss (the resource name suggests self-service).
-- **Colony membership (this change, replacing migration 011's member-linking model):** `POST /colonies/:id/members` and its bulk counterpart are now **create-or-link** (upsert) instead of add-only — see §4 for the exact rule. Both remain colony-admin-of-`:id`-only, checked once per request (not per row for bulk). `POST /colonies/:id/members/:userId/reset-password` is new, colony-admin-of-`:id`-only, and replaces the retired `POST /members/:id/reset-password`. There is still no self-service "leave a colony" and still no way to demote/remove the last admin.
+- **Colony membership:** `POST /colonies/:id/members` and its bulk counterpart are **create-or-link** (upsert) — see §4 for the exact rule, now phone-only (migration 016). Both remain colony-admin-of-`:id`-only, checked once per request (not per row for bulk). `POST /colonies/:id/members/:userId/reset-password` is colony-admin-of-`:id`-only. There is still no self-service "leave a colony" and still no way to demote/remove the last admin.
 
 **Mobile auth flow the backend actually supports:**
 ```
-Register (POST /auth/register)
+An admin creates the account (POST /colonies/:id/members or its bulk variant)
+  — there is no self-registration; the mobile app has no "Sign Up" screen
   ↓
-Login (POST /auth/login) → { token }
+Login (POST /auth/login, { phone, password }) → { token }
   ↓
 Store token securely on-device (e.g. secure storage / keychain)
   ↓
@@ -383,9 +387,9 @@ On any 401 from a write call, discard token and re-prompt login
 ## 6. Business Workflows
 
 ### Colony + membership bootstrap
-1. User registers, logs in.
+1. A user account exists (see the bootstrapping-gap note in §3/§5/§12 — for the very first account in a deployment, this happens outside the API) and logs in.
 2. `POST /colonies` — creates the colony **and**, in the same DB transaction, an admin `colony_memberships` row for the creator (`colonyService.createColony`). This is the one place in the codebase with an explicit multi-table transaction.
-3. Admin calls `POST /colonies/:id/members` with `{ name, email?, phone?, password?, role? }` — this either links an already-registered person by their email/phone, or creates a brand-new account for them on the spot (no more 404 "not registered yet"; see §4/§5).
+3. Admin calls `POST /colonies/:id/members` with `{ name, phone, password?, role? }` — this either links an already-registered person by their phone, or creates a brand-new account for them on the spot.
 4. From here on, every write under that colony's festivals/expenses/tasks/etc. requires the acting user to be an **admin** of that colony, not just any member (see §5).
 
 ### Donation (pledge → payment) workflow
@@ -424,16 +428,16 @@ Error response format is uniform across the whole API: `{ "error": "<message>" }
 | Delete blocked by dependent rows | 400 | `"cannot delete task with existing task_assignments; remove those first"` | Caught Postgres `23503` on the DELETE itself |
 | Insufficient colony privilege | 403 | `"you must be an admin of this colony to do that"` / `"you must be an admin of at least one colony to do that"` | `colonyMembershipService.assertColonyAdmin`/`assertAdminOfAnyColony` (this change — `assertColonyMember` was removed, colony-admin is now the only write role) |
 | Missing/invalid/expired JWT on a write | 401 | `"missing or malformed Authorization header"` / `"invalid or expired token"` | `middleware/auth.js` |
-| Wrong password or unknown email/phone at login | 401 | `"invalid credentials"` (identical message, intentionally) | `authService.loginUser` |
-| Login with both `email` and `phone`, or with neither | 400 | `"provide either email or phone, not both"` / `"password and either email or phone are required"` | Manual check in `authService.loginUser` (migration 012) |
+| Wrong password or unknown phone at login | 401 | `"invalid credentials"` (identical message, intentionally) | `authService.loginUser` |
+| Login missing `phone` or `password` | 400 | `"phone and password are required"` | Manual check in `authService.loginUser` (migration 016 — replaces the old email/phone exactly-one-of checks, which no longer apply) |
 | Row not found (or soft-deleted) | 404 | `"donation not found"` etc. | Manual `if (!rows[0]) throw` in every `get*` |
-| Duplicate email at registration | 409 | `"email already registered"` | Caught Postgres `23505` |
 | Duplicate colony membership | 409 | `"that user is already a member of this colony"` | Caught Postgres `23505` |
 | Removing/demoting the last colony admin | 400 | `"cannot remove the last admin of a colony"` | Manual check (`isSoleAdmin`) |
 | Wrong current password on change-password | 401 | `"current password is incorrect"` | `authService.changePassword` |
-| Colony-member add/bulk-add: neither or both of email/phone given | 400 | `"email or phone is required"` / `"provide either email or phone, not both"` | `colonyMembershipService.upsertMembership` (this change, mirrors `authService.loginUser`'s wording) |
-| Colony-member add/bulk-add: creating a new account without name/password | 400 | `"name is required to create a new account"` / `"password is required to create a new account"` | `colonyMembershipService.upsertMembership` (this change) — not an error at all if the identifier resolves to an existing account (name/password are simply ignored) |
-| Colony-member reset-password: target isn't a member of this colony | 404 | `"membership not found"` | `colonyMembershipService.resetMemberPassword` (this change) |
+| Colony-member add/bulk-add: missing phone | 400 | `"phone is required"` | `colonyMembershipService.upsertMembership` (migration 016 — replaces the old "email or phone is required"/"provide either... not both" pair, since `phone` is the only identifier now) |
+| Colony-member add/bulk-add: creating a new account without name/password | 400 | `"name is required to create a new account"` / `"password is required to create a new account"` | `colonyMembershipService.upsertMembership` — not an error at all if the phone resolves to an existing account (name/password are simply ignored) |
+| Colony-member reset-password: target isn't a member of this colony | 404 | `"membership not found"` | `colonyMembershipService.resetMemberPassword` |
+| `POST /auth/register` | 401 or 404 | n/a — the route no longer exists | Falls through to the app-wide write gate (401 unauthenticated) or Express's default not-found handling (404 authenticated, no route matches) |
 | Unexpected/uncaught error | 500 | raw `err.message` (whatever Postgres or Node produced) | Fallback in the central error handler |
 
 Notes for a mobile client:
@@ -445,13 +449,13 @@ Notes for a mobile client:
 
 ## 8. Mobile Application Requirements
 
-### Screen: Login / Register
-**Purpose:** Authenticate, or create an account.
+### Screen: Login
+**Purpose:** Authenticate. There is no registration screen — self-registration doesn't exist (migration 016); every account is created by a colony admin (`POST /colonies/:id/members`), so a new user's phone/password must already have been set by an admin before they can ever reach this screen.
 **Who can access it:** Anyone (unauthenticated).
-**Data required:** Register: name, email, password. Login: password plus exactly one of email/phone (most self-registered users only have email, but a colony-added volunteer may only have a phone login, so a login form should offer both, not just email).
-**APIs required:** `POST /auth/register`, `POST /auth/login`.
-**Actions:** Submit registration (name+email+password only — there is no phone-based self-registration); submit login (email or phone); switch between the two forms.
-**States:** Loading (submitting); Error (400 missing field or both-identifiers-given on login, 409 duplicate email on register, 401 bad credentials); Success (registered → prompt login; logged in → store token, navigate to Colony picker).
+**Data required:** `phone`, `password`.
+**APIs required:** `POST /auth/login`.
+**Actions:** Submit login. No "create account" affordance belongs here.
+**States:** Loading (submitting); Error (400 missing `phone`/`password`, 401 bad credentials); Success (logged in → store token, navigate to Colony picker).
 
 ### Screen: Colony Picker / List
 **Purpose:** Choose or create the colony to work in.
@@ -466,8 +470,8 @@ Notes for a mobile client:
 **Who can access it:** Anyone for the base detail (public read); membership list/management requires being logged in, admin-only for mutation.
 **Data required:** `GET /colonies/:id`; `GET /colonies/:id/members` (auth required); `GET /users?search=` (auth required) to look up the user to add.
 **APIs required:** `GET /colonies/:id`, `PATCH /colonies/:id` (admin), `GET /colonies/:id/members`, `GET /users?search=`, `POST /colonies/:id/members`, `POST /colonies/:id/members/bulk`, `PATCH /colonies/:id/members/:userId`, `DELETE /colonies/:id/members/:userId`.
-**Actions:** Edit name/location (admin only); search registered users by partial name/email/phone via `GET /users?search=` and pick one to link, or type a brand-new person's `{ name, email/phone, password, role? }` to create-and-add them in one call (admin only — `POST /colonies/:id/members` no longer 404s on an unregistered identifier; it creates the account); bulk-add many people at once via a CSV/XLSX file (admin only — `POST /colonies/:id/members/bulk`), showing the created/skipped/error breakdown per row (skipped = already a member, created rows show whether each was `linked` or a brand-new `created` account); reset a member's password (`POST /colonies/:id/members/:userId/reset-password`, admin only, no current-password check); promote/demote a member; remove a member (blocked if it's the last admin).
-**States:** Loading; Error (403 if not admin attempting a mutation, 400 on a new-account row missing name/password or on last-admin removal); Success. `GET /users` and `GET /colonies/:id/members` both include `name` now — use it in the picker instead of email/phone alone.
+**Actions:** Edit name/location (admin only); search registered users by partial name/phone via `GET /users?search=` and pick one to link, or type a brand-new person's `{ name, phone, password, role? }` to create-and-add them in one call (admin only — `POST /colonies/:id/members` doesn't 404 on an unregistered phone; it creates the account); bulk-add many people at once via a CSV/XLSX file (admin only — `POST /colonies/:id/members/bulk`), showing the created/skipped/error breakdown per row (skipped = already a member, created rows show whether each was `linked` or a brand-new `created` account); reset a member's password (`POST /colonies/:id/members/:userId/reset-password`, admin only, no current-password check); promote/demote a member; remove a member (blocked if it's the last admin).
+**States:** Loading; Error (403 if not admin attempting a mutation, 400 on a new-account row missing name/password or on last-admin removal); Success. `GET /users` and `GET /colonies/:id/members` both return `name`/`phone` — use `name` in the picker instead of a bare phone number. Neither response has ever included `password_hash`; neither has an `email` field anymore (migration 016).
 
 ### Screen: Festival Dashboard
 **Purpose:** The main "home" screen for a specific festival — shows the live balance and links into every other module.
@@ -514,7 +518,7 @@ Notes for a mobile client:
 
 ### Screen: Volunteer Directory / Profile
 **Purpose:** There is no separate volunteer directory anymore — volunteers/organizers **are** `users`. This screen is really "the colony's member list" (`GET /colonies/:id/members`), plus a per-person profile rolling up their task signups and availability.
-**Data required:** `GET /colonies/:id/members` (name/email/phone/role), `GET /task-assignments?user_id=`, `GET /availability?user_id=`.
+**Data required:** `GET /colonies/:id/members` (name/phone/role), `GET /task-assignments?user_id=`, `GET /availability?user_id=`.
 **APIs required:** `GET /colonies/:id/members`, `POST /colonies/:id/members`, `POST /colonies/:id/members/bulk`, `POST /colonies/:id/members/:userId/reset-password`, `PATCH /colonies/:id/members/:userId`, plus the filtered lists above, and `POST/PATCH/DELETE /availability` (colony-admin only, see §5).
 **Actions:** Add a person to the colony by linking their existing account or creating a new one on the spot (colony admin — see the Colony Detail screen above, same endpoint); bulk-onboard a roster via CSV/XLSX, showing the created/skipped/error breakdown per row; reset a person's password (colony admin, no current-password check); promote/demote within the colony; view a person's signups and availability calendar; a colony admin toggles a day's availability on someone's behalf (not self-service, see §5).
 **States:** Loading; Empty; Error (403 not-admin, 400 on a new-account bulk row missing name/password, per-row errors surfaced from a bulk-import response rather than a single top-level error); Success.
@@ -524,7 +528,7 @@ Notes for a mobile client:
 ## 9. User Journey
 
 ```
-Login / Register
+Login  (no Register — accounts are admin-created, see §5)
   ↓
 Colony Picker  ("mine" vs "all")
   ↓
@@ -544,7 +548,7 @@ Colony membership management (add/remove/promote members, edit colony name/locat
 ## 10. MVP Scope
 
 ### Must Have
-- Login / Register (only two auth screens the backend supports)
+- Login (the only auth screen the backend supports — there is no Register)
 - Colony picker + create colony
 - Festival dashboard (create, list, view balance)
 - Donors: create/list/view/edit
@@ -593,12 +597,13 @@ There is no separate "controller" layer distinct from the route file, and no mod
 - **No pagination anywhere.** Every list endpoint returns the full table filtered only by exact-match query params. A mobile client should assume list responses could grow unbounded over a festival's lifetime (e.g. `donations`) and may want its own client-side windowing/lazy-loading, since the server won't do it.
 - **Colony scoping is now consistent** (previously flagged here as inconsistent, across three prior sessions) — every write in the app requires colony-admin, either of a specific colony (resolved via FK chain) or of at least one colony (`donors`/walk-in `donations`/`availability`, which have no FK path to a specific colony). `members` no longer exists, so its old "optional scoping" middle ground is gone too.
 - **Inconsistent delete semantics** across resources (soft-delete for 3 money tables, hard-delete for 3 lower-stakes tables, no delete at all for the remaining 6) is intentional per CLAUDE.md/PROGRESS.md, but it means a mobile client can't apply one generic "delete" UX pattern everywhere — it has to know, per-resource, which behavior applies.
-- **No user profile / `/me` endpoint.** A mobile client has no server-provided way to fetch "who am I" other than what it captured from the login response's JWT payload client-side (email/user_id only, no `name` — decode the JWT or persist it from login/register). If the token needs re-hydrating after app restart, the client must decode the stored JWT itself.
+- **No user profile / `/me` endpoint.** A mobile client has no server-provided way to fetch "who am I" other than what it captured from the login response's JWT payload client-side (`user_id`/`phone` only, no `name` — decode the JWT). If the token needs re-hydrating after app restart, the client must decode the stored JWT itself.
 - **No refresh token / session extension.** A 7-day hard expiry with no silent renewal means a mobile client must handle full re-authentication reasonably often, including mid-form (the UI_UX_FUNCTIONAL_SPEC.md flags this explicitly).
 - **Duplicated authorization-resolution pattern.** Each service that needs colony scoping repeats the same `const colonyId = await colonyIdForX(...); if (colonyId !== null) await assertColonyAdmin(...)` shape. Not currently a bug, but worth knowing it's copy-pasted per resource rather than middleware-enforced, so a future rule change would need touching every service file individually.
-- **Placeholder accounts from the members→users migration.** Any pre-existing `members` row that had task-assignment/availability history but no linked login got an auto-created `users` row with an unusable random password (migration 014) — a colony admin needs to run `POST /colonies/:id/members/:userId/reset-password` before that person can actually log in. A mobile client shouldn't assume every row in `GET /colonies/:id/members` currently has a working password.
+- **Placeholder accounts from the members→users migration are moot as of migration 016.** Migration 014's backfill (auto-created `users` rows with an unusable random password for pre-existing `members` rows with no linked login) is historical only — migration 016 was a destructive, non-backfilled schema change confirmed safe specifically because the database held only test/seed data at the time, so there's no production data carrying that concern forward. Not deleting the note from migration history, just flagging that it no longer describes a live risk.
+- **No API path exists to create the very first user account (migration 016).** `POST /colonies/:id/members` requires an existing colony admin; `POST /colonies` requires an existing authenticated user; there is no third path now that self-registration is gone. Every fresh deployment needs its first account provisioned directly against the database (see §3/§5). A mobile client has nothing to build for this — it's purely an ops/deployment step.
 - **`vendor_name` and `purpose` fields are free text**, not linked entities — a mobile client shouldn't expect a vendor picker or autocomplete backed by a real `vendors` table; none exists.
-- **Environment/deploy note (from PROGRESS.md, not something to re-verify yourself):** the `.env` `DATABASE_URL` at the time of the last recorded session pointed at a Render-internal hostname unreachable outside Render's network, and migration `009` (colony_memberships) had not yet been applied to that production database. A mobile client developer hitting a deployed instance should confirm with the backend owner that migrations are current before assuming colony-membership behavior is live there.
+- **Environment/deploy note (from PROGRESS.md, not something to re-verify yourself):** the `.env` `DATABASE_URL` at the time of the last recorded session pointed at a Render-internal hostname unreachable outside Render's network. A mobile client developer hitting a deployed instance should confirm with the backend owner that migrations (including `016_drop_email.sql`) are current before assuming phone-only login is live there.
 
 ---
 
@@ -609,5 +614,6 @@ There is no separate "controller" layer distinct from the route file, and no mod
 - **Is there any intent to add roles beyond colony admin/member** (e.g. a "volunteer" self-service login, or a global platform-admin role)? With colony-admin now the only write role, `'member'` is closer to a pure read/roster-visibility marker than a role in its own right — worth asking whether that's the intended long-term shape, or whether some middle "member can do X but not Y" tier will be wanted later.
 - **Cascade/deletion policy for colonies, festivals, donors, and expected_donations** is explicitly unresolved in the backend itself (no DELETE endpoints exist for any of them) — a mobile app should not assume these will ever be deletable, nor guess at what "delete a colony" should cascade to.
 - **Push notifications, file/photo attachments (e.g. a photo of a receipt for an expense payment), and any offline-sync expectations** — none of these exist in the backend today; if the mobile app needs them, they would require new backend work, not just client work.
-- **Whether the 12-domain UI_UX_FUNCTIONAL_SPEC.md's screen inventory should be treated as authoritative for information architecture** — it's a strong starting point and mostly consistent with this analysis, but was written before colony membership existed, so its "one role, no per-colony scoping" framing (rule 5 in that doc) is now incorrect and should be disregarded in favor of Section 5 above. It also still describes a standalone `members` roster, which no longer exists as of this change.
-- **Migration-014 placeholder accounts (see §11) still need reset-password runs.** Before relying on `GET /colonies/:id/members` rows as "this person can log in," confirm with the backend owner whether that one-time cleanup has actually been run against whichever database the mobile app targets.
+- **Whether the 12-domain UI_UX_FUNCTIONAL_SPEC.md's screen inventory should be treated as authoritative for information architecture** — it's a strong starting point, but was written before colony membership existed and before phone-only login, so its "one role, no per-colony scoping" framing (rule 5) and any email-based auth description are both incorrect and should be disregarded in favor of Sections 3/4/5 above. It also still describes a standalone `members` roster, which no longer exists.
+- **How is the very first account in a fresh deployment actually meant to be provisioned?** (see §3/§5/§11) — this backend has no API answer anymore. Worth asking the backend owner whether there's meant to be a seed script, an ops runbook, or a one-off manual `INSERT`, since none of those exist in the repo today.
+- ~~Migration-014 placeholder accounts still need reset-password runs.~~ **Moot as of migration 016** — the schema change that dropped `email` was a destructive, non-backfilled change confirmed safe because the database held only test/seed data; there's no production data left carrying this concern forward.
