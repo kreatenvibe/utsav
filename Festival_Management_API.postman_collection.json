@@ -543,7 +543,7 @@
     },
     {
       "name": "Donors",
-      "description": "People/entities who pledge or give donations — a global roster with no colony_id, so writes here only require being logged in, not membership in any particular colony. No DELETE endpoint yet (deferred).",
+      "description": "People/entities who pledge or give donations — colony-scoped as of migration 018 (donors.colony_id, required). Writes require the caller to be an admin of that specific colony. No DELETE endpoint yet (deferred).",
       "item": [
         {
           "name": "Create Donor",
@@ -555,14 +555,14 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Anil Kumar Traders\",\n  \"phone\": \"9822011223\"\n}"
+              "raw": "{\n  \"colony_id\": {{colonyId}},\n  \"name\": \"Anil Kumar Traders\",\n  \"phone\": \"9822011223\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/donors",
               "host": ["{{baseUrl}}"],
               "path": ["donors"]
             },
-            "description": "Requires auth. Only `name` is required; `phone` is optional."
+            "description": "Requires auth — caller must be an admin of `colony_id`. `colony_id` and `name` are required; `phone` is optional."
           }
         },
         {
@@ -579,11 +579,14 @@
               ]
             },
             "url": {
-              "raw": "{{baseUrl}}/donors/bulk",
+              "raw": "{{baseUrl}}/donors/bulk?colony_id={{colonyId}}",
               "host": ["{{baseUrl}}"],
-              "path": ["donors", "bulk"]
+              "path": ["donors", "bulk"],
+              "query": [
+                { "key": "colony_id", "value": "{{colonyId}}", "description": "Required — every imported row is created under this colony." }
+              ]
             },
-            "description": "Requires auth (any authenticated user — donors are not colony-scoped). `multipart/form-data`, a `file` field (`.csv`/`.xlsx`/`.xls`, 5MB cap) with columns `name` (required per row) and `phone` (optional). No uniqueness constraint on donors at all, so there is no dedup — re-uploading the same file creates duplicate rows. Returns 201 with `{ created: [...], skipped: [], errors: [...] }` — `created`: `{ row, donor_id, name, phone }`; `errors`: missing `name`. `skipped` is always `[]` (kept for response-shape consistency with the other bulk-import endpoints)."
+            "description": "Requires auth — caller must be an admin of `colony_id` (query param). `multipart/form-data`, a `file` field (`.csv`/`.xlsx`/`.xls`, 5MB cap) with columns `name` (required per row) and `phone` (optional). No uniqueness constraint on donors at all, so there is no dedup — re-uploading the same file creates duplicate rows. Returns 201 with `{ created: [...], skipped: [], errors: [...] }` — `created`: `{ row, donor_id, name, phone }`; `errors`: missing `name`. `skipped` is always `[]` (kept for response-shape consistency with the other bulk-import endpoints)."
           }
         },
         {
@@ -596,10 +599,11 @@
               "host": ["{{baseUrl}}"],
               "path": ["donors"],
               "query": [
+                { "key": "colony_id", "value": "{{colonyId}}", "description": "Optional, filters to donors in this colony", "disabled": true },
                 { "key": "search", "value": "anil", "description": "Optional, partial case-insensitive match against name OR phone", "disabled": true }
               ]
             },
-            "description": "Public — no auth required. Optional `?search=` matches partial, case-insensitive against `name` OR `phone`."
+            "description": "Public — no auth required. Optional `?colony_id=` filters to one colony's directory; combine with `?search=` (partial, case-insensitive against `name` OR `phone`) to narrow further. Omit both for the full cross-colony list, ordered by name."
           }
         },
         {
@@ -632,7 +636,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["donors", "{{donorId}}"]
             },
-            "description": "Requires auth. Partial update."
+            "description": "Requires auth — caller must be an admin of the donor's own colony (fetched server-side, not passed in the body). Partial update — `name`/`phone` only, `colony_id` is not editable via this endpoint."
           }
         }
       ]

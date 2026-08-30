@@ -248,7 +248,7 @@ test('donations tied to a pledge require colony-admin via expected_donation->fes
   const donorRes = await request(app)
     .post('/donors')
     .set('Authorization', `Bearer ${admin.token}`)
-    .send({ name: 'Test Donor' });
+    .send({ colony_id: colony.colony_id, name: 'Test Donor' });
   assert.equal(donorRes.status, 201);
 
   const expectedRes = await request(app)

@@ -1,30 +1,43 @@
 import { pool } from '../db/pool.js';
 import { parseRoster } from './rosterParser.js';
-import { assertAdminOfAnyColony } from './colonyMembershipService.js';
+import { assertColonyAdmin } from './colonyMembershipService.js';
 
-export async function createDonor({ name, phone }, actingUserId) {
-  await assertAdminOfAnyColony(actingUserId);
+function requireColonyId(colony_id) {
+  if (colony_id === undefined || colony_id === null || Number.isNaN(Number(colony_id))) {
+    const err = new Error('colony_id is required and must be a number');
+    err.status = 400;
+    throw err;
+  }
+}
+
+export async function createDonor({ colony_id, name, phone }, actingUserId) {
+  requireColonyId(colony_id);
+  await assertColonyAdmin(actingUserId, colony_id);
   if (!name) {
     const err = new Error('name is required');
     err.status = 400;
     throw err;
   }
   const { rows } = await pool.query(
-    'INSERT INTO donors (name, phone) VALUES ($1, $2) RETURNING *',
-    [name, phone ?? null]
+    'INSERT INTO donors (colony_id, name, phone) VALUES ($1, $2, $3) RETURNING *',
+    [colony_id, name, phone ?? null]
   );
   return rows[0];
 }
 
-export async function listDonors({ search } = {}) {
-  if (search) {
-    const { rows } = await pool.query(
-      'SELECT * FROM donors WHERE name ILIKE $1 OR phone ILIKE $1 ORDER BY donor_id',
-      [`%${search}%`]
-    );
-    return rows;
+export async function listDonors({ colony_id, search } = {}) {
+  const conditions = [];
+  const params = [];
+  if (colony_id) {
+    params.push(colony_id);
+    conditions.push(`colony_id = $${params.length}`);
   }
-  const { rows } = await pool.query('SELECT * FROM donors ORDER BY donor_id');
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`(name ILIKE $${params.length} OR phone ILIKE $${params.length})`);
+  }
+  const where = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
+  const { rows } = await pool.query(`SELECT * FROM donors${where} ORDER BY name ASC`, params);
   return rows;
 }
 
@@ -38,8 +51,9 @@ export async function getDonor(id) {
   return rows[0];
 }
 
-export async function bulkImportDonors(file, actingUserId) {
-  await assertAdminOfAnyColony(actingUserId);
+export async function bulkImportDonors(colony_id, file, actingUserId) {
+  requireColonyId(colony_id);
+  await assertColonyAdmin(actingUserId, colony_id);
   if (!file) {
     const err = new Error('file is required');
     err.status = 400;
@@ -65,8 +79,8 @@ export async function bulkImportDonors(file, actingUserId) {
 
     try {
       const { rows: donorRows } = await pool.query(
-        'INSERT INTO donors (name, phone) VALUES ($1, $2) RETURNING donor_id',
-        [name, phone]
+        'INSERT INTO donors (colony_id, name, phone) VALUES ($1, $2, $3) RETURNING donor_id',
+        [colony_id, name, phone]
       );
       created.push({ row: rowNumber, donor_id: donorRows[0].donor_id, name, phone });
     } catch (err) {
@@ -78,8 +92,8 @@ export async function bulkImportDonors(file, actingUserId) {
 }
 
 export async function updateDonor(id, { name, phone }, actingUserId) {
-  await assertAdminOfAnyColony(actingUserId);
-  await getDonor(id);
+  const donor = await getDonor(id);
+  await assertColonyAdmin(actingUserId, donor.colony_id);
   const { rows } = await pool.query(
     `UPDATE donors SET
        name = COALESCE($2, name),

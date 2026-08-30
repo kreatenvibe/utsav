@@ -6,6 +6,8 @@
 
 *Also out of date as of migration `016_drop_email.sql`: any prior description of `email`-based login/registration. There is no `email` column, no `POST /auth/register`, and no self-registration path anymore — see §3/§4/§5 below.*
 
+*Also out of date as of migration `018_add_colony_id_to_donors.sql`: any prior description of `donors` as a flat, unscoped directory gated by "admin of any colony." Donors now carry a required `colony_id` and are gated the same way as festivals/expenses/tasks — see §3/§4/§5 below.*
+
 ---
 
 ## 1. Understand the Product
@@ -17,8 +19,8 @@
 **User roles that exist in the code today (as of migration 016 — `email` is gone, phone is the only login identifier, and self-registration no longer exists on top of migration 015's `members` retirement and colony-admin-only write model):**
 - **Unauthenticated visitor** — can read (GET) everything, no login needed.
 - **Registered user** — logging in alone grants no write access anywhere except creating a colony (which auto-admins the creator). Every account is created by a colony admin (`POST /colonies/:id/members` or its bulk variant) — there is no self-registration.
-- **Colony admin of at least one colony** — the gate for donors, walk-in donations, and availability (none of which have a specific colony to check against — see §5).
-- **Colony admin of a specific colony** (`colony_memberships.role = 'admin'`) — the gate for every colony-owned write: festivals, pledges, donations tied to a pledge, expenses, expense payments, tasks, task assignments, and colony membership add/remove/promote/reset-password. Also edits the colony's own `name`/`location`. The colony creator is auto-admined. A colony can never be left with zero admins (enforced in code).
+- **Colony admin of at least one colony** — the gate for walk-in donations and availability (neither has a specific colony to check against — see §5).
+- **Colony admin of a specific colony** (`colony_memberships.role = 'admin'`) — the gate for every colony-owned write: festivals, donors (as of migration 018), pledges, donations tied to a pledge, expenses, expense payments, tasks, task assignments, and colony membership add/remove/promote/reset-password. Also edits the colony's own `name`/`location`. The colony creator is auto-admined. A colony can never be left with zero admins (enforced in code).
 - There is no plain "colony member" write role anymore — being `role = 'member'` grants no write access beyond what any authenticated user already has; it exists only to record who belongs to a colony (visible via `GET /colonies/mine`/`GET /colonies/:id/members`).
 
 There is no "volunteer" or "donor" login role — `donors` are plain data rows, not user accounts. Volunteers **are** `users` rows now (see below) — the old separate `members` directory was retired in migration 015.
@@ -36,7 +38,7 @@ There is no "volunteer" or "donor" login role — `donors` are plain data rows, 
 10. Task Assignments (volunteer signups)
 11. Availability (volunteer yes/no calendar)
 
-**How domains relate:** Everything nests under a **Colony → Festival**. Festivals own Expected Donations, Expenses, and Tasks. Each of those has a child "payment/actual" table (Donations, Expense Payments) or child junction (Task Assignments). Donors are a flat directory referenced by FK from the money tables, not scoped to a colony themselves. Volunteers/organizers are just `users` — task assignments and availability now point straight at `users`, the same table that backs login.
+**How domains relate:** Everything nests under a **Colony → Festival**. Festivals own Expected Donations, Expenses, and Tasks. Each of those has a child "payment/actual" table (Donations, Expense Payments) or child junction (Task Assignments). Donors are their own colony-scoped directory (as of migration 018 — each donor belongs to one `colony_id`), referenced by FK from the money tables. Volunteers/organizers are just `users` — task assignments and availability now point straight at `users`, the same table that backs login.
 
 ```
 Colony
@@ -105,8 +107,9 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 - `current_balance` originally existed as a stored column (migration 001) but was **dropped** in migration 006 — it's now always computed at query time (see below). This is a deliberate, confirmed-with-user schema change; CLAUDE.md's "current_balance is always computed, never stored" rule reflects this.
 
 **donors**
-- `donor_id` (PK), `name` (required), `phone` (optional).
+- `donor_id` (PK), `colony_id` (FK → `colony`, required as of migration 018), `name` (required), `phone` (optional).
 - People who give money. Unlike volunteers/organizers, donors were never merged into `users` — they have no login concept at all.
+- **Colony-scoped as of migration 018** — each donor belongs to exactly one colony's directory. `fk_donors_colony` is `ON DELETE CASCADE` (a deviation from the rest of this schema, whose FKs have no `ON DELETE` clause at all — done here because it's what removes a colony's donor rows if that colony is ever deleted, and no DELETE endpoint exists for colonies yet to make that a live concern). Indexed on `colony_id` and on `(colony_id, name)`. Backfilled from each donor's existing pledge (`expected_donations` → `festival.colony_id`) where one existed, else the first `colony` row.
 
 **expected_donations** (a pledge)
 - `expected_id` (PK), `donor_id` (FK, required), `festival_id` (FK, required), `expected_amount` (required), `year` (required), `purpose` (free text, optional), `status` (`'open'`|`'closed'`, default `'open'`, CHECK-enforced, organizer-set).
@@ -147,6 +150,7 @@ festival ──1:N──▶ expected_donations, expenses, tasks
 expected_donations ──1:N──▶ donations
 expenses ──1:N──▶ expense_payments
 tasks ──1:N──▶ task_assignments
+colony ──1:N──▶ donors
 donors ──1:N──▶ expected_donations, donations
 users ──1:N──▶ task_assignments, availability
 users ──optional FK──▶ donations.collected_by, expense_payments.paid_by
@@ -158,7 +162,7 @@ users ──optional FK──▶ donations.collected_by, expense_payments.paid_b
 - `festival.current_balance` = SUM(donations linked via expected_donations to this festival) − SUM(expense_payments linked via expenses to this festival), both excluding soft-deleted rows. **Walk-in donations (`expected_id IS NULL`) are excluded** — there's no schema path from a walk-in donation to a festival.
 
 ### Authorization scoping, resolved (previously "explicitly out of scope")
-This used to be a flagged, deferred inconsistency (donors/walk-in-donations/availability were writable by any authenticated user, with no colony check at all). It's resolved now: **every write in the app requires colony-admin.** Donors, walk-in donations, and availability have no FK path to a specific colony, so their gate is "admin of *at least one* colony" (`assertAdminOfAnyColony`) rather than a specific colony's admin — see §5 for the full rule and reasoning. No self-service "leave a colony" still exists — only an admin can remove a member (including another admin, down to but not the last one).
+This used to be a flagged, deferred inconsistency (donors/walk-in-donations/availability were writable by any authenticated user, with no colony check at all). It's resolved now: **every write in the app requires colony-admin.** Walk-in donations and availability still have no FK path to a specific colony, so their gate remains "admin of *at least one* colony" (`assertAdminOfAnyColony`). **Donors are the exception as of migration 018** — now that `donors.colony_id` exists, donor writes require admin of *that specific colony* (`assertColonyAdmin`), the same gate as every other colony-owned resource — see §5 for the full rule.
 
 ---
 
@@ -247,15 +251,15 @@ Base URL has no global prefix (e.g. routes are mounted directly at `/colonies`, 
 
 | Method | Endpoint | Purpose | Auth |
 |---|---|---|---|
-| POST | `/donors` | Create | 🔒, must be an admin of at least one colony |
-| POST | `/donors/bulk` | Create many from a CSV/XLSX file | 🔒, must be an admin of at least one colony |
-| GET | `/donors?search=` | List, optional partial name/phone search | — |
+| POST | `/donors` | Create | 🔒, must be an admin of the donor's `colony_id` |
+| POST | `/donors/bulk?colony_id=` | Create many from a CSV/XLSX file | 🔒, must be an admin of `colony_id` |
+| GET | `/donors?colony_id=&search=` | List, optional colony filter + partial name/phone search | — |
 | GET | `/donors/:id` | Detail | — |
-| PATCH | `/donors/:id` | Edit name/phone | 🔒, must be an admin of at least one colony |
+| PATCH | `/donors/:id` | Edit name/phone | 🔒, must be an admin of the donor's own `colony_id` |
 
-Donors have no `colony_id` and no FK path to any specific colony, so the gate here isn't "admin of *the* colony" — it's "admin of *any* colony" (see §5). `?search=` matches partial, case-insensitive against `name` OR `phone`.
+**Colony-scoped as of migration 018** — donors now carry a required `colony_id`, and every write is gated the same way as any other colony-owned resource (`assertColonyAdmin`, §5), not the looser "admin of any colony" rule. `POST /donors` body is `{ colony_id, name, phone? }` — 400 if `colony_id` is missing or not a number. `GET /donors?colony_id=` filters to that colony's directory; combine with `?search=` (partial, case-insensitive against `name` OR `phone`) to narrow further — omit `colony_id` to see the full cross-colony list. `PATCH /donors/:id` fetches the donor first (404 if it doesn't exist) and checks the caller is an admin of *that donor's* colony, not any colony.
 
-**Bulk import** (`POST /donors/bulk`) — `multipart/form-data`, `file` field only. File columns: `name` (required per row), `phone` (optional). No uniqueness constraint on name or phone, so there is no dedup rule and no `skipped` case — every row with a name lands in `created`; only a missing name produces a row-level `errors` entry. Response `201`:
+**Bulk import** (`POST /donors/bulk?colony_id=`) — `multipart/form-data`, `file` field only; `colony_id` is a query parameter (multipart bodies don't reliably surface non-file fields in `req.body` the same way a JSON body would), required — 400 if missing. File columns: `name` (required per row), `phone` (optional). Every row is inserted with the request's `colony_id`. No uniqueness constraint on name or phone, so there is no dedup rule and no `skipped` case — every row with a name lands in `created`; only a missing name produces a row-level `errors` entry. Response `201`:
 ```json
 {
   "created": [{ "row": 1, "donor_id": 7, "name": "...", "phone": "..." }],
@@ -263,7 +267,9 @@ Donors have no `colony_id` and no FK path to any specific colony, so the gate he
   "errors":  [{ "row": 2, "name": null, "reason": "name is required" }]
 }
 ```
-`skipped` is always `[]` — kept for response-shape consistency with the other bulk-import endpoints. Top-level 400 if no file.
+`skipped` is always `[]` — kept for response-shape consistency with the other bulk-import endpoints. Top-level 400 if no file or no `colony_id`.
+
+**Integrity check on pledge creation**: `POST /expected-donations` now rejects (400 `"Donor belongs to a different colony"`) a `donor_id` whose `colony_id` doesn't match the target festival's colony — see §4 Expected Donations below.
 
 ### Expected Donations (pledges)
 
@@ -274,7 +280,7 @@ Donors have no `colony_id` and no FK path to any specific colony, so the gate he
 | GET | `/expected-donations/:id` | Detail, includes computed `total_donated` | — |
 | PATCH | `/expected-donations/:id` | Edit amount/year/purpose/status | 🔒, colony admin |
 
-Create body: `{ donor_id, festival_id, expected_amount, year, purpose? }`, first four required. `status` must be `'open'`/`'closed'` on PATCH (400 otherwise).
+Create body: `{ donor_id, festival_id, expected_amount, year, purpose? }`, first four required. `status` must be `'open'`/`'closed'` on PATCH (400 otherwise). **As of migration 018**, when `festival_id` resolves to a real festival, the donor's `colony_id` must match that festival's colony — a mismatch is 400 `"Donor belongs to a different colony"`. A `donor_id` that doesn't exist at all is left to the existing FK-violation 400 on insert (unchanged); a nonexistent `festival_id` skips both the colony-admin check and this new check the same way it always has, same null-skip convention used elsewhere in this service.
 
 ### Donations
 
@@ -350,7 +356,7 @@ Create body: `{ user_id, date, is_available }` (renamed from `member_id`), all r
 
 **`POST /availability/bulk`** (new): body `{ user_id, dates: string[], is_available }` — `dates` must be a non-empty array of real `YYYY-MM-DD` calendar dates (400 on an empty array or any malformed/nonexistent date, e.g. `2026-02-30`), `is_available` a JS boolean. Same auth gate and same idempotent-upsert semantics as single create, applied per date in one round trip (`INSERT ... SELECT unnest($dates::date[]) ... ON CONFLICT (user_id, date) DO UPDATE`) — built for multi-day festivals (Navratri, Ganesh Utsav) so the mobile client doesn't fire one request per day. Returns `201` with the array of created/updated rows (same shape as single create, inlined `user`), ordered by `date`. 400 on a bad `user_id` (FK violation, same translation as single create).
 
-**No pagination and no sort-order control anywhere in the API** — every list is `ORDER BY <primary key> ASC` with no override. Filtering is exact-match everywhere **except** four endpoints with a partial, case-insensitive `?search=`: `GET /users?search=` (name/phone), `GET /donors?search=` (name/phone), `GET /colonies?search=` (name/location). No other endpoint has free-text search. (`GET /members?search=` no longer exists — `members` was retired.)
+**No pagination and no sort-order control anywhere in the API** — every list is `ORDER BY <primary key> ASC` with no override, **except `GET /donors`, which is `ORDER BY name ASC`** (migration 018). Filtering is exact-match everywhere **except** four endpoints with a partial, case-insensitive `?search=`: `GET /users?search=` (name/phone), `GET /donors?search=` (name/phone, combinable with `?colony_id=`), `GET /colonies?search=` (name/location). No other endpoint has free-text search. (`GET /members?search=` no longer exists — `members` was retired.)
 
 ---
 
@@ -370,7 +376,8 @@ Create body: `{ user_id, date, is_available }` (renamed from `member_id`), all r
 - **Global gate:** In `app.js`, every `POST`/`PUT`/`PATCH`/`DELETE` request across the whole app requires a valid JWT (applied *after* `/auth` is mounted, so login stays open). All `GET` requests are public with no exceptions **except** `/colonies/mine`, `/colonies/:id/members`, and `/users`, which explicitly require auth even though they're GETs (because they expose other users' phone numbers). `app.js` itself needed no code change for the register removal — it only mounts the `/auth` router as a whole, so deleting one route inside that router leaves no dead reference; an unauthenticated `POST /auth/register` now falls through to the global write gate (401), and an authenticated one falls through to Express's default 404 (no route matches in any router).
 - **Bootstrapping gap: resolved.** `POST /auth/bootstrap` (new, see above) now provides the API path that was missing here — the first account in a fresh deployment no longer needs a direct database insert. It's a one-time-only endpoint (403 once any `users` row exists), not a general admin-provisioning tool.
 - **Roles/permissions beyond colony membership:** None system-wide — every registered user can create a colony and become its admin. Within a colony, `role = 'member'` no longer carries any write privilege of its own (see below) — the only roles that matter for authorization purposes are "colony admin of a specific colony" and "colony admin of at least one colony."
-- **Authorization — colony-admin is the only write role, app-wide (this change).** Previously, most colony-descended writes only required `assertColonyMember` (any member could write); this is now `assertColonyAdmin` everywhere: `festivals`, `expected_donations`, `donations` (when tied to a pledge via `expected_id`), `expenses`, `expense_payments`, `tasks`, `task_assignments`, and colony membership add/remove/promote/reset-password. `donors`, walk-in `donations` (no `expected_id`), and `availability` have no FK path to a specific colony at all, so they use a new, looser gate — `assertAdminOfAnyColony(userId)` (`colonyMembershipService.js`) — true if the user is `role = 'admin'` on *any* `colony_memberships` row, regardless of which colony. This closes a gap flagged across three prior sessions (PROGRESS.md) where those three resources were writable by any authenticated user with no colony check at all. **Reasoning for extending rather than leaving them unscoped**: the task driving this change was explicitly "colony-admin the only write role app-wide" — leaving three resources as the sole exceptions would have reproduced the exact inconsistency being fixed. **Mobile consequence**: the Donors screens and the Walk-in Donation screen need a "current user is admin of ≥1 colony" gate before showing their write actions — derivable client-side from `GET /colonies/mine` (any row with `role: "admin"`), no new endpoint needed.
+- **Authorization — colony-admin is the only write role, app-wide (this change).** Previously, most colony-descended writes only required `assertColonyMember` (any member could write); this is now `assertColonyAdmin` everywhere: `festivals`, `expected_donations`, `donations` (when tied to a pledge via `expected_id`), `expenses`, `expense_payments`, `tasks`, `task_assignments`, `donors` (as of migration 018 — see below), and colony membership add/remove/promote/reset-password. Walk-in `donations` (no `expected_id`) and `availability` still have no FK path to a specific colony at all, so they keep the looser gate — `assertAdminOfAnyColony(userId)` (`colonyMembershipService.js`) — true if the user is `role = 'admin'` on *any* `colony_memberships` row, regardless of which colony. This closes a gap flagged across three prior sessions (PROGRESS.md) where donors/walk-in-donations/availability were writable by any authenticated user with no colony check at all. **Mobile consequence**: the Walk-in Donation screen still needs a "current user is admin of ≥1 colony" gate (derivable from `GET /colonies/mine`, any row with `role: "admin"`); the Donors screens now need "current user is admin of *that specific donor's* colony" instead, same as any other colony-owned resource.
+- **Donors are now colony-scoped (migration 018).** `donors.colony_id` is required, so `POST /donors`, `POST /donors/bulk`, and `PATCH /donors/:id` all use `assertColonyAdmin(userId, colony_id)` — admin of the donor's own colony, not "any colony" anymore. `PATCH /donors/:id` resolves `colony_id` by fetching the donor first (404 if it doesn't exist), the same fetch-then-assert pattern `expected_donations`/`expenses`/`tasks` PATCH already use. `POST /expected-donations` additionally cross-checks that the pledged donor's `colony_id` matches the target festival's colony (400 `"Donor belongs to a different colony"` on mismatch) — see §4.
 - **Task assignments are no longer self-service.** Signing up for a task (`POST /task-assignments`) and cancelling a signup (`DELETE /task-assignments/:id`) now require the *caller* to be a colony admin of the task's colony — not the person being signed up. An ordinary colony member can no longer add themselves to a task; only an admin enrolls volunteers. This is a deliberate product change made as part of the app-wide admin-only rule above, called out explicitly here because it's easy to miss (the resource name suggests self-service).
 - **Colony membership:** `POST /colonies/:id/members` and its bulk counterpart are **create-or-link** (upsert) — see §4 for the exact rule, now phone-only (migration 016). Both remain colony-admin-of-`:id`-only, checked once per request (not per row for bulk). `POST /colonies/:id/members/:userId/reset-password` is colony-admin-of-`:id`-only. There is still no self-service "leave a colony" and still no way to demote/remove the last admin.
 
@@ -407,8 +414,8 @@ On any 401 from a write call, discard token and re-prompt login
 4. From here on, every write under that colony's festivals/expenses/tasks/etc. requires the acting user to be an **admin** of that colony, not just any member (see §5).
 
 ### Donation (pledge → payment) workflow
-1. Organizer creates a **Donor** (`POST /donors`) if new.
-2. Organizer creates an **Expected Donation** (`POST /expected-donations`) — a pledge tied to a donor + festival, with an amount and year.
+1. Organizer creates a **Donor** (`POST /donors`, body includes `colony_id`) if new — the donor's colony must match the festival's colony the pledge will target, or step 2 rejects it.
+2. Organizer creates an **Expected Donation** (`POST /expected-donations`) — a pledge tied to a donor + festival, with an amount and year. As of migration 018, a mismatched donor/festival colony is rejected (400 `"Donor belongs to a different colony"`).
 3. As money comes in, organizer logs one or more **Donations** (`POST /donations`) against that `expected_id` — each is a frozen row, `amount` never edited again.
 4. `GET /expected-donations/:id` recomputes `total_donated` live by summing those donations.
 5. Organizer explicitly `PATCH`es the pledge's `status` to `'closed'` when done — this never happens automatically, even if `total_donated >= expected_amount`.
@@ -441,6 +448,7 @@ Error response format is uniform across the whole API: `{ "error": "<message>" }
 | FK references a nonexistent row | 400 | `"colony_id does not reference an existing colony"` | Caught Postgres `23503`, translated |
 | Delete blocked by dependent rows | 400 | `"cannot delete task with existing task_assignments; remove those first"` | Caught Postgres `23503` on the DELETE itself |
 | Insufficient colony privilege | 403 | `"you must be an admin of this colony to do that"` / `"you must be an admin of at least one colony to do that"` | `colonyMembershipService.assertColonyAdmin`/`assertAdminOfAnyColony` (this change — `assertColonyMember` was removed, colony-admin is now the only write role) |
+| Pledge's donor and festival belong to different colonies | 400 | `"Donor belongs to a different colony"` | `expectedDonationService.createExpectedDonation` (migration 018) |
 | Missing/invalid/expired JWT on a write | 401 | `"missing or malformed Authorization header"` / `"invalid or expired token"` | `middleware/auth.js` |
 | Wrong password or unknown phone at login | 401 | `"invalid credentials"` (identical message, intentionally) | `authService.loginUser` |
 | Login missing `phone` or `password` | 400 | `"phone and password are required"` | Manual check in `authService.loginUser` (migration 016 — replaces the old email/phone exactly-one-of checks, which no longer apply) |
@@ -499,10 +507,10 @@ Notes for a mobile client:
 
 ### Screen: Donors Directory + Donor Detail
 **Purpose:** Manage the list of people who give money; drill into one donor's pledges/gifts.
-**Data required:** `GET /donors`, `GET /donors/:id`, and filtered `GET /expected-donations?donor_id=`, `GET /donations?donor_id=`.
-**APIs required:** `POST /donors`, `POST /donors/bulk`, `GET /donors`, `GET /donors/:id`, `PATCH /donors/:id`.
-**Actions:** Add/edit a donor; bulk-import many donors at once via a CSV/XLSX file (name required, phone optional — no dedup, so re-uploading the same file creates duplicates); view their pledge and payment history (multiple calls, not bundled by the API). All three writes now require the caller to be an admin of at least one colony (see §5) — gate these actions behind that check client-side.
-**States:** Loading; Empty; Error (403 if not an admin of any colony, per-row errors surfaced from the bulk-import response); Success.
+**Data required:** `GET /donors?colony_id=`, `GET /donors/:id`, and filtered `GET /expected-donations?donor_id=`, `GET /donations?donor_id=`.
+**APIs required:** `POST /donors`, `POST /donors/bulk?colony_id=`, `GET /donors?colony_id=`, `GET /donors/:id`, `PATCH /donors/:id`.
+**Actions:** Add/edit a donor within a specific colony (`colony_id` required on create); bulk-import many donors at once via a CSV/XLSX file into one colony (`colony_id` on the request, name required per row, phone optional — no dedup, so re-uploading the same file creates duplicates); view their pledge and payment history (multiple calls, not bundled by the API). All three writes now require the caller to be an admin of the donor's own colony (see §5, migration 018) — gate these actions behind that check client-side, scoped per-colony rather than "admin of any colony."
+**States:** Loading; Empty; Error (403 if not an admin of the relevant colony, 400 if `colony_id` is missing/invalid, per-row errors surfaced from the bulk-import response); Success.
 
 ### Screen: Pledges (Expected Donations) List + Detail
 **Purpose:** Track what donors promised vs. what's actually been paid.
@@ -513,8 +521,8 @@ Notes for a mobile client:
 
 ### Screen: Log a Walk-in Donation
 **Purpose:** Record a gift with no prior pledge.
-**Data required:** donor (existing or newly created), amount, date, optional collector.
-**APIs required:** `POST /donors` (if new), `POST /donations` (no `expected_id`).
+**Data required:** donor (existing or newly created, scoped to a `colony_id`), amount, date, optional collector.
+**APIs required:** `POST /donors` (if new, requires `colony_id`), `POST /donations` (no `expected_id`).
 **Actions:** Quick-add flow.
 **States:** Loading; Error; Success — note this donation won't appear in any festival's balance.
 
@@ -611,7 +619,7 @@ There is no separate "controller" layer distinct from the route file, and no mod
 
 **Potential concerns for whoever builds on top of this:**
 - **No pagination anywhere.** Every list endpoint returns the full table filtered only by exact-match query params. A mobile client should assume list responses could grow unbounded over a festival's lifetime (e.g. `donations`) and may want its own client-side windowing/lazy-loading, since the server won't do it.
-- **Colony scoping is now consistent** (previously flagged here as inconsistent, across three prior sessions) — every write in the app requires colony-admin, either of a specific colony (resolved via FK chain) or of at least one colony (`donors`/walk-in `donations`/`availability`, which have no FK path to a specific colony). `members` no longer exists, so its old "optional scoping" middle ground is gone too.
+- **Colony scoping is now consistent** (previously flagged here as inconsistent, across three prior sessions) — every write in the app requires colony-admin, either of a specific colony (resolved via FK chain, now including `donors` as of migration 018) or of at least one colony (walk-in `donations`/`availability`, which still have no FK path to a specific colony). `members` no longer exists, so its old "optional scoping" middle ground is gone too.
 - **Inconsistent delete semantics** across resources (soft-delete for 3 money tables, hard-delete for 3 lower-stakes tables, no delete at all for the remaining 6) is intentional per CLAUDE.md/PROGRESS.md, but it means a mobile client can't apply one generic "delete" UX pattern everywhere — it has to know, per-resource, which behavior applies.
 - **No user profile / `/me` endpoint.** A mobile client has no server-provided way to fetch "who am I" other than what it captured from the login response's JWT payload client-side (`user_id`/`phone` only, no `name` — decode the JWT). If the token needs re-hydrating after app restart, the client must decode the stored JWT itself.
 - **No refresh token / session extension.** A 7-day hard expiry with no silent renewal means a mobile client must handle full re-authentication reasonably often, including mid-form (the UI_UX_FUNCTIONAL_SPEC.md flags this explicitly).
@@ -626,7 +634,7 @@ There is no separate "controller" layer distinct from the route file, and no mod
 ## 12. Unknowns / Questions
 
 - **Is there a deployed/staging URL the mobile app should target**, or is local-only development the current state? Not present in the code — `.env`'s `PORT`/`DATABASE_URL` are local dev config, and PROGRESS.md mentions a Render instance but its accessibility/migration status as of today is unconfirmed.
-- ~~Will `donors`/`availability`/walk-in-donations ever become colony-scoped?~~ **Resolved by this change**: yes, all three now require the caller to be an admin of at least one colony (see §5) — closing what had been an open, deliberately deferred question across three prior sessions.
+- ~~Will `donors`/`availability`/walk-in-donations ever become colony-scoped?~~ **Resolved, in two stages.** All three first required the caller to be an admin of *at least one* colony. As of migration 018, `donors` went further — it now has a real `colony_id` and requires admin of *that specific* colony, same as festivals/expenses/tasks. `availability` and walk-in `donations` still have no FK path to a colony, so they remain on the looser "any colony" gate.
 - **Is there any intent to add roles beyond colony admin/member** (e.g. a "volunteer" self-service login, or a global platform-admin role)? With colony-admin now the only write role, `'member'` is closer to a pure read/roster-visibility marker than a role in its own right — worth asking whether that's the intended long-term shape, or whether some middle "member can do X but not Y" tier will be wanted later.
 - **Cascade/deletion policy for colonies, festivals, donors, and expected_donations** is explicitly unresolved in the backend itself (no DELETE endpoints exist for any of them) — a mobile app should not assume these will ever be deletable, nor guess at what "delete a colony" should cascade to.
 - **Push notifications, file/photo attachments (e.g. a photo of a receipt for an expense payment), and any offline-sync expectations** — none of these exist in the backend today; if the mobile app needs them, they would require new backend work, not just client work.

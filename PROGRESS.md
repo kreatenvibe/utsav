@@ -18,14 +18,96 @@ scoping gap that was previously deferred here), the `members` table is
 gone (retired in favor of `users` + `colony_memberships`), `email` is
 gone too — phone is now the sole login identifier and self-registration no
 longer exists, and the first-account-provisioning gap that opened is now
-closed by `POST /auth/bootstrap` (see below), and `availability` now has a
+closed by `POST /auth/bootstrap` (see below), `availability` now has a
 `UNIQUE (user_id, date)` constraint with idempotent upsert on
 `POST /availability` plus a new `POST /availability/bulk` for multi-date
-submission (see below). Next: not yet decided — open
+submission (see below), and `donors` now carry a required `colony_id` and
+are gated by admin-of-*that*-colony rather than admin-of-any-colony (see
+below) — the only two resources left on the looser any-colony gate are
+walk-in donations and availability. Next: not yet decided — open
 candidate is DELETE for colonies/festivals/donors/expected_donations (still
 deferred, cascade behavior not decided). Ask user before picking.
+**`migrations/018_add_colony_id_to_donors.sql` has NOT been applied to the
+Render DB yet** — same caveat as every migration since 009: needs
+`npm run migrate` from an environment that can reach Render's internal
+Postgres host, or applying it via Render's own console.
 
 ## Done
+- **Scoped `donors` to a specific colony** (see `plans/donors-colony-scoping.md`):
+  closes the last piece of the "colony-admin is the only write role" story —
+  `donors` was the one remaining resource gated by the looser "admin of any
+  colony" rule (`assertAdminOfAnyColony`) purely because it had no
+  `colony_id` to check against. Now it does.
+  `migrations/018_add_colony_id_to_donors.sql` adds `donors.colony_id`
+  (backfilled from each donor's existing pledge via
+  `expected_donations → festival.colony_id`, falling back to the first
+  `colony` row for any donor with no pledge, `NOT NULL` after backfill),
+  `fk_donors_colony` FK (**`ON DELETE CASCADE`, per explicit instruction** —
+  a deliberate deviation from every other FK in this schema, none of which
+  has an `ON DELETE` clause; flagged, not silently matched to either
+  convention), plus an index on `colony_id` and a compound `(colony_id,
+  name)` index.
+  **Schema-name note**: the request's SQL sketch referenced `colonies`/
+  `festivals` (plural); this schema's real tables are singular (`colony`,
+  `festival`, from migration 001) — the migration targets the real names.
+  **`services/donorService.js`** (the file `routes/donors.js` actually
+  imports — the request called it `donorsService.js`, but no such file
+  existed or was imported anywhere; edited the real one rather than adding a
+  dead parallel file) now requires `colony_id` on create/bulk-import (400 if
+  missing/non-numeric) and reuses the existing `assertColonyAdmin(userId,
+  colonyId)` from `colonyMembershipService.js` (already exactly the "admin
+  of colony X" check the request called `assertAdminOfColony` — no need for
+  a second identically-behaving export). `listDonors` gained `colony_id` as
+  a combinable filter alongside the existing `search`, and list order
+  changed from `donor_id ASC` to `name ASC` (per the request's `listDonors`
+  spec). `updateDonor` fetches the donor first (404 if missing) then asserts
+  admin of *that donor's own* `colony_id`, mirroring the existing
+  fetch-then-assert pattern already used by `expectedDonationService
+  .updateExpectedDonation`/`expenseService`/`taskService`.
+  **Routes**: `POST /donors` body gains required `colony_id`. `POST
+  /donors/bulk` takes `colony_id` as a query param (`?colony_id=`) rather
+  than a body field — multipart requests don't reliably surface non-file
+  fields the way a JSON body does, and the request's own spec allowed either
+  multipart-body-or-query-param, so query param was chosen. `GET
+  /donors?colony_id=&search=` — both optional, combinable, `colony_id` alone
+  now returns only that colony's directory.
+  **Integrity check**: `expectedDonationService.createExpectedDonation` now
+  rejects (400 `"Donor belongs to a different colony"`) a pledge whose
+  donor's `colony_id` doesn't match the target festival's colony — checked
+  only when the festival itself resolves (same null-skip convention this
+  function already used for the colony-admin check); a nonexistent donor is
+  still left to the existing FK-violation 400 on insert, unchanged.
+  `assertAdminOfAnyColony` itself is untouched and still used by walk-in
+  `donations` and `availability`, which still have no FK path to a colony.
+  Test suite: `test/bulkImport.test.js`'s donor-bulk test updated to pass
+  `colony_id` and assert every created row carries it, plus a new
+  missing-`colony_id` → 400 case. `test/colonyMembership.test.js`'s donor
+  creation in the pledge/donation-chain test updated to pass `colony_id`
+  (same colony as the festival it pledges against, so the new integrity
+  check doesn't fire there). All 19 tests pass (17 pre-existing + 2 new).
+  Manually verified against the local docker Postgres + running server
+  (`.env` swapped, `npm run migrate` applied `018` cleanly, `npm test`, then
+  a manual pass, `.env` restored to the Render line afterward — same
+  swap-and-restore convention as every prior session): `POST /donors`
+  missing `colony_id` (400); donor created in colony A; festival created in
+  colony B; pledging that donor against the colony-B festival (400 `"Donor
+  belongs to a different colony"`); a same-colony pledge (201); `GET
+  /donors?colony_id=` correctly isolating each colony's directory, combined
+  with `?search=` narrowing further; `PATCH /donors/:id` blocked (403) for a
+  user who isn't an admin of the donor's colony, allowed (200) for one who
+  is; `PATCH` on a nonexistent donor (404); `POST /donors/bulk?colony_id=`
+  creating rows all stamped with that colony. All manually-created rows
+  cleaned up afterward.
+  `docs/BACKEND_ANALYSIS.md` updated beyond just §4/§5 as requested — §1,
+  §3 (entity/relationship/authorization-scoping), §6 (donation workflow,
+  walk-in donation screen), §7 (new error-table row), §8 (Donors Directory
+  screen), §11/§12 (resolved-question update) all had stale "donors are
+  globally admin-gated, no `colony_id`" language that would have misled a
+  reader otherwise — same "don't leave stale mentions elsewhere" convention
+  every prior session in this file has followed.
+  `Festival_Management_API.postman_collection.json`'s Donors folder updated
+  to match (Create/Bulk/List/Update request bodies, query params, and
+  descriptions).
 - **Availability: unique `(user_id, date)` + idempotent upsert + bulk create**
   (see `plans/availability-unique-bulk.md`): fixes a real duplicate-rows bug
   (the same date could be submitted repeatedly for the same user with no

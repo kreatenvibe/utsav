@@ -176,14 +176,14 @@ test('POST /colonies/:id/members/bulk: mixed created/skipped/error rows, admin-o
   assert.equal(missingFile.status, 400);
 });
 
-test('POST /donors/bulk: creates rows with a name, errors on missing name, no dedup', async () => {
+test('POST /donors/bulk: creates rows with a name, errors on missing name, no dedup, scoped to colony_id', async () => {
   const admin = await createLoginUser('donor-bulk-admin');
-  await createColony(admin.token); // donor writes now require admin-of-any-colony
+  const colony = await createColony(admin.token); // donor writes now require admin of this specific colony
 
   const csv = ['name,phone', 'Anita Sharma,9990001111', ',9990002222', 'Anita Sharma,9990001111'].join('\n');
 
   const res = await request(app)
-    .post('/donors/bulk')
+    .post(`/donors/bulk?colony_id=${colony.colony_id}`)
     .set('Authorization', `Bearer ${admin.token}`)
     .attach('file', Buffer.from(csv), 'donors.csv');
 
@@ -204,4 +204,21 @@ test('POST /donors/bulk: creates rows with a name, errors on missing name, no de
   assert.deepEqual(res.body.skipped, []);
 
   created.donorIds.push(...res.body.created.map((c) => c.donor_id));
+
+  const { rows: donorRows } = await pool.query('SELECT colony_id FROM donors WHERE donor_id = ANY($1)', [
+    res.body.created.map((c) => c.donor_id),
+  ]);
+  assert.ok(donorRows.every((r) => r.colony_id === colony.colony_id));
+});
+
+test('POST /donors/bulk: missing colony_id is rejected', async () => {
+  const admin = await createLoginUser('donor-bulk-no-colony');
+  const csv = ['name,phone', 'No Colony Donor,9990003333'].join('\n');
+
+  const res = await request(app)
+    .post('/donors/bulk')
+    .set('Authorization', `Bearer ${admin.token}`)
+    .attach('file', Buffer.from(csv), 'donors.csv');
+
+  assert.equal(res.status, 400);
 });

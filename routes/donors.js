@@ -27,7 +27,8 @@ router.post(
   },
   async (req, res, next) => {
     try {
-      res.status(201).json(await donorService.bulkImportDonors(req.file, req.user.user_id));
+      const colonyId = req.query.colony_id ?? req.body?.colony_id;
+      res.status(201).json(await donorService.bulkImportDonors(colonyId, req.file, req.user.user_id));
     } catch (err) {
       next(err);
     }
@@ -36,7 +37,7 @@ router.post(
 
 router.get('/', async (req, res, next) => {
   try {
-    res.json(await donorService.listDonors({ search: req.query.search }));
+    res.json(await donorService.listDonors({ colony_id: req.query.colony_id, search: req.query.search }));
   } catch (err) {
     next(err);
   }

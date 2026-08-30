@@ -19,6 +19,13 @@ export async function createExpectedDonation({ donor_id, festival_id, expected_a
   const colonyId = await colonyIdForFestival(festival_id);
   if (colonyId !== null) {
     await assertColonyAdmin(actingUserId, colonyId);
+    const { rows: donorRows } = await pool.query('SELECT colony_id FROM donors WHERE donor_id = $1', [donor_id]);
+    const donorColonyId = donorRows[0]?.colony_id ?? null;
+    if (donorColonyId !== null && donorColonyId !== colonyId) {
+      const err = new Error('Donor belongs to a different colony');
+      err.status = 400;
+      throw err;
+    }
   }
   try {
     const { rows } = await pool.query(
