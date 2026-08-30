@@ -136,6 +136,7 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 **availability**
 - `availability_id` (PK), `user_id` (FK → **users**, required, renamed from `member_id` in migration 015), `date` (required, identity field — not editable), `is_available` (required boolean, the only PATCH-able field).
 - Date-level only, no time-of-day granularity. Hard-deleted. GET responses inline `user: { name, phone }` (`email` dropped in migration 016).
+- **`UNIQUE (user_id, date)`** as of migration 017 (`uq_availability_user_date`) — a given user can have at most one row per date. `POST /availability` (and the new bulk endpoint below) is now idempotent on this pair: re-posting the same `(user_id, date)` updates `is_available` in place via `ON CONFLICT ... DO UPDATE` rather than erroring or creating a duplicate row. The migration deduplicated any pre-existing duplicate rows first, keeping the highest `availability_id` per pair.
 
 ### Relationship overview
 
@@ -336,13 +337,18 @@ Create body: `{ task_id, user_id }` (renamed from `member_id`). No PATCH — not
 
 | Method | Endpoint | Purpose | Auth |
 |---|---|---|---|
-| POST | `/availability` | Create a day's yes/no | 🔒, must be an admin of at least one colony |
+| POST | `/availability` | Create/update a day's yes/no | 🔒, must be an admin of at least one colony |
+| POST | `/availability/bulk` | Create/update multiple dates in one call | 🔒, must be an admin of at least one colony |
 | GET | `/availability?user_id=&date=` | List, filterable | — |
 | GET | `/availability/:id` | Detail | — |
 | PATCH | `/availability/:id` | Flip `is_available` only | 🔒, must be an admin of at least one colony |
 | DELETE | `/availability/:id` | Hard delete | 🔒, must be an admin of at least one colony |
 
 Create body: `{ user_id, date, is_available }` (renamed from `member_id`), all required; `is_available` must be a JS boolean (400 otherwise). `availability` has no FK path to a specific colony, so — like donors — the gate is admin-of-*any*-colony, not a specific colony's admin (see §5). This is a real behavior change from before: previously any authenticated user could write their own availability; now only a colony admin can write anyone's. GET responses inline `user: { name, phone }` alongside the raw `user_id` (`email` dropped in migration 016).
+
+**As of migration 017, `POST /availability` is idempotent** on `(user_id, date)` (now a unique constraint) — posting the same pair again updates `is_available` instead of erroring or duplicating the row.
+
+**`POST /availability/bulk`** (new): body `{ user_id, dates: string[], is_available }` — `dates` must be a non-empty array of real `YYYY-MM-DD` calendar dates (400 on an empty array or any malformed/nonexistent date, e.g. `2026-02-30`), `is_available` a JS boolean. Same auth gate and same idempotent-upsert semantics as single create, applied per date in one round trip (`INSERT ... SELECT unnest($dates::date[]) ... ON CONFLICT (user_id, date) DO UPDATE`) — built for multi-day festivals (Navratri, Ganesh Utsav) so the mobile client doesn't fire one request per day. Returns `201` with the array of created/updated rows (same shape as single create, inlined `user`), ordered by `date`. 400 on a bad `user_id` (FK violation, same translation as single create).
 
 **No pagination and no sort-order control anywhere in the API** — every list is `ORDER BY <primary key> ASC` with no override. Filtering is exact-match everywhere **except** four endpoints with a partial, case-insensitive `?search=`: `GET /users?search=` (name/phone), `GET /donors?search=` (name/phone), `GET /colonies?search=` (name/location). No other endpoint has free-text search. (`GET /members?search=` no longer exists — `members` was retired.)
 

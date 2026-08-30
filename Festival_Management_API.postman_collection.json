@@ -1110,7 +1110,7 @@
     },
     {
       "name": "Availability",
-      "description": "Whether a member is available on a given date. HARD delete, no soft-delete concept here. This table has no festival_id/colony_id at all, so it's NOT colony-scoped — writes here only require being logged in, not membership in any particular colony (a known gap, flagged not silently decided).",
+      "description": "Whether a user is available on a given date. HARD delete, no soft-delete concept here. This table has no festival_id/colony_id at all, so it's NOT colony-scoped by a specific colony — writes here require the caller to be an admin of at least one colony (see Colonies). `(user_id, date)` is unique as of migration 017 — POST (single or bulk) is idempotent: re-posting the same pair updates `is_available` instead of erroring or duplicating the row.",
       "item": [
         {
           "name": "Create Availability",
@@ -1122,14 +1122,34 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"member_id\": {{memberId}},\n  \"date\": \"2026-08-25\",\n  \"is_available\": true\n}"
+              "raw": "{\n  \"user_id\": {{memberUserId}},\n  \"date\": \"2026-08-25\",\n  \"is_available\": true\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/availability",
               "host": ["{{baseUrl}}"],
               "path": ["availability"]
             },
-            "description": "Requires auth. `member_id`, `date` (YYYY-MM-DD), and `is_available` (boolean) are all required — `is_available` must be a real boolean, not a truthy string."
+            "description": "Requires the caller to be an admin of at least one colony. `user_id`, `date` (YYYY-MM-DD), and `is_available` (boolean) are all required — `is_available` must be a real boolean, not a truthy string. Idempotent on `(user_id, date)`: posting the same pair again updates `is_available` in place instead of creating a duplicate row."
+          }
+        },
+        {
+          "name": "Bulk Create Availability",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": {{memberUserId}},\n  \"dates\": [\"2026-10-15\", \"2026-10-16\", \"2026-10-17\"],\n  \"is_available\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/availability/bulk",
+              "host": ["{{baseUrl}}"],
+              "path": ["availability", "bulk"]
+            },
+            "description": "Requires the caller to be an admin of at least one colony (same gate as single Create Availability). Submits multiple dates in one request — built for multi-day festivals (Navratri, Ganesh Utsav) so the client doesn't have to fire one request per day. `user_id` and `is_available` (boolean) are required; `dates` must be a non-empty array of real `YYYY-MM-DD` calendar dates. 400 if `dates` is empty, contains a malformed or nonexistent date (e.g. `2026-02-30`), or `user_id` doesn't reference an existing user. Returns 201 with the array of created/updated rows (same shape as single Create Availability), ordered by `date`. Each `(user_id, date)` pair is upserted — an existing row for that date has its `is_available` updated rather than a duplicate being created."
           }
         },
         {
@@ -1138,11 +1158,11 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/availability?member_id={{memberId}}&date=2026-08-25",
+              "raw": "{{baseUrl}}/availability?user_id={{memberUserId}}&date=2026-08-25",
               "host": ["{{baseUrl}}"],
               "path": ["availability"],
               "query": [
-                { "key": "member_id", "value": "{{memberId}}", "description": "Optional filter" },
+                { "key": "user_id", "value": "{{memberUserId}}", "description": "Optional filter" },
                 { "key": "date", "value": "2026-08-25", "description": "Optional filter, YYYY-MM-DD" }
               ]
             },
@@ -1179,7 +1199,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["availability", "{{availabilityId}}"]
             },
-            "description": "Requires auth. `is_available` (boolean) is required — this endpoint only updates that field."
+            "description": "Requires the caller to be an admin of at least one colony. `is_available` (boolean) is required — this endpoint only updates that field."
           }
         },
         {
@@ -1194,7 +1214,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["availability", "{{availabilityId}}"]
             },
-            "description": "Requires auth. HARD delete. Returns 204."
+            "description": "Requires the caller to be an admin of at least one colony. HARD delete. Returns 204."
           }
         }
       ]

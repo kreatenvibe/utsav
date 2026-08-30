@@ -2,6 +2,13 @@ import { pool } from '../db/pool.js';
 import { assertAdminOfAnyColony } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidDateString(value) {
+  if (typeof value !== 'string' || !DATE_RE.test(value)) return false;
+  const d = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
 
 const BASE_SELECT = `
   SELECT av.*, u.name AS user_name, u.phone AS user_phone
@@ -25,10 +32,45 @@ export async function createAvailability({ user_id, date, is_available }, acting
   try {
     const { rows } = await pool.query(
       `INSERT INTO availability (user_id, date, is_available)
-       VALUES ($1, $2, $3) RETURNING availability_id`,
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, date) DO UPDATE SET is_available = EXCLUDED.is_available
+       RETURNING availability_id`,
       [user_id, date, is_available]
     );
     return getAvailability(rows[0].availability_id);
+  } catch (err) {
+    if (err.code === FK_VIOLATION) {
+      const e = new Error('user_id does not reference an existing row');
+      e.status = 400;
+      throw e;
+    }
+    throw err;
+  }
+}
+
+export async function bulkCreateAvailability({ user_id, dates, is_available }, actingUserId) {
+  if (!user_id || !Array.isArray(dates) || dates.length === 0 || typeof is_available !== 'boolean') {
+    const err = new Error('user_id, a non-empty dates array, and is_available (boolean) are required');
+    err.status = 400;
+    throw err;
+  }
+  const badDate = dates.find((d) => !isValidDateString(d));
+  if (badDate !== undefined) {
+    const err = new Error(`invalid date in dates array: ${badDate}`);
+    err.status = 400;
+    throw err;
+  }
+  await assertAdminOfAnyColony(actingUserId);
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO availability (user_id, date, is_available)
+       SELECT $1, unnest($2::date[]), $3
+       ON CONFLICT (user_id, date) DO UPDATE SET is_available = EXCLUDED.is_available
+       RETURNING availability_id`,
+      [user_id, dates, is_available]
+    );
+    const created = await Promise.all(rows.map((row) => getAvailability(row.availability_id)));
+    return created.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   } catch (err) {
     if (err.code === FK_VIOLATION) {
       const e = new Error('user_id does not reference an existing row');

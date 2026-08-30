@@ -11,6 +11,14 @@ router.post('/', async (req, res, next) => {
   }
 });
 
+router.post('/bulk', async (req, res, next) => {
+  try {
+    res.status(201).json(await availabilityService.bulkCreateAvailability(req.body, req.user.user_id));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/', async (req, res, next) => {
   try {
     const { user_id, date } = req.query;

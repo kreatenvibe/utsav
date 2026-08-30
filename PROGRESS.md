@@ -18,11 +18,73 @@ scoping gap that was previously deferred here), the `members` table is
 gone (retired in favor of `users` + `colony_memberships`), `email` is
 gone too — phone is now the sole login identifier and self-registration no
 longer exists, and the first-account-provisioning gap that opened is now
-closed by `POST /auth/bootstrap` (see below). Next: not yet decided — open
+closed by `POST /auth/bootstrap` (see below), and `availability` now has a
+`UNIQUE (user_id, date)` constraint with idempotent upsert on
+`POST /availability` plus a new `POST /availability/bulk` for multi-date
+submission (see below). Next: not yet decided — open
 candidate is DELETE for colonies/festivals/donors/expected_donations (still
 deferred, cascade behavior not decided). Ask user before picking.
 
 ## Done
+- **Availability: unique `(user_id, date)` + idempotent upsert + bulk create**
+  (see `plans/availability-unique-bulk.md`): fixes a real duplicate-rows bug
+  (the same date could be submitted repeatedly for the same user with no
+  constraint stopping it) and adds multi-date submission for multi-day
+  festivals (Navratri, Ganesh Utsav) so the mobile client doesn't fire one
+  request per day.
+  `migrations/017_unique_user_availability_date.sql`: deduplicates any
+  pre-existing `(user_id, date)` duplicates first (keeps the highest
+  `availability_id` per pair), then adds
+  `UNIQUE (user_id, date)` as `uq_availability_user_date`.
+  **`POST /availability`** now upserts on conflict
+  (`ON CONFLICT (user_id, date) DO UPDATE SET is_available = EXCLUDED.is_available`)
+  instead of erroring or duplicating — re-posting the same pair just flips
+  the flag on the existing row (same `availability_id` back).
+  **New `POST /availability/bulk`**: body `{ user_id, dates: string[],
+  is_available }`, same `assertAdminOfAnyColony` gate as every other
+  availability write (this *is* the "colony admin" check for a table with no
+  FK path to a specific colony — see the admin-of-any-colony gate introduced
+  in the members/colony-membership session). Single round-trip via
+  `INSERT ... SELECT unnest($dates::date[]) ... ON CONFLICT ... DO UPDATE`,
+  each row re-fetched through the existing `user`-inlining select so the
+  response shape matches every other availability endpoint. Returns 201 with
+  the created/updated rows ordered by date.
+  **Validation bug caught and fixed during manual testing, not just format
+  checking**: a regex-only check (`/^\d{4}-\d{2}-\d{2}$/`) accepts
+  shape-valid but calendar-invalid strings like `"2026-13-40"` or
+  `"2026-02-30"` — those reached Postgres and came back as a raw 500
+  (`date/time field value out of range`) instead of a clean 400. Fixed with
+  an `isValidDateString` helper that round-trips the string through
+  `Date`/`toISOString` and rejects anything that doesn't match exactly
+  (confirmed `2024-02-29` — a real leap day — still passes). Applied to the
+  bulk endpoint's per-element validation; single create still relies on
+  Postgres's own date parsing (unchanged, out of scope for this task).
+  All 18 pre-existing tests still pass unchanged (no new automated test file
+  added — verified manually only, per the task's own verification list).
+  Manually verified against the local docker Postgres + running server:
+  migration applied cleanly; same `(user_id, date)` posted twice returned
+  the same `availability_id` with the flag flipped, confirmed via direct
+  `psql` that no duplicate row exists; bulk create of 3 new dates (201, 3
+  rows); a second bulk call overlapping 2 of those dates plus 1 new one
+  correctly updated the 2 and inserted the 1; empty `dates` array (400);
+  `2026-13-40` and `2026-02-30` both now 400 (were 500 before the fix);
+  `2024-02-29` (leap day) succeeds; nonexistent `user_id` (400, FK
+  translation); a plain (non-admin) colony member calling the bulk endpoint
+  gets 403 "you must be an admin of at least one colony to do that". `.env`
+  swapped to the local docker line for both the migration/test run and the
+  manual server pass, then restored to the Render line afterward — same
+  swap-and-restore convention as every prior session.
+  **`migrations/017_unique_user_availability_date.sql` has NOT been applied
+  to the Render DB yet** — same caveat as migration 009's session: needs
+  `npm run migrate` run from an environment that can reach Render's internal
+  Postgres host, or applied via Render's own console.
+  `docs/BACKEND_ANALYSIS.md` updated (§3 `availability` entity, §4
+  Availability endpoint table/bodies) and
+  `Festival_Management_API.postman_collection.json` updated (new Bulk
+  Create Availability request; Create/List/Update/Delete Availability
+  descriptions and the List filter corrected from the stale `member_id` to
+  `user_id`, which had been left over from before migration 015 retired
+  `members`).
 - **`POST /auth/bootstrap`** (see `plans/bootstrap-first-user.md`): closes
   the first-account-provisioning gap that migration 016 opened (flagged
   across the last two sessions) — a fresh deployment no longer needs a
