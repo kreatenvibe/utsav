@@ -1,5 +1,5 @@
 import { pool } from '../db/pool.js';
-import { colonyIdForExpectedDonation, assertColonyAdmin, assertAdminOfAnyColony } from './colonyMembershipService.js';
+import { colonyIdForExpectedDonation, colonyIdForFestival, assertColonyAdmin, assertAdminOfAnyColony } from './colonyMembershipService.js';
 
 const FK_VIOLATION = '23503';
 
@@ -21,12 +21,18 @@ function shape(row) {
   };
 }
 
-export async function createDonation({ donor_id, expected_id, amount, date, collected_by }, actingUserId) {
+export async function createDonation({ donor_id, expected_id, festival_id, amount, date, collected_by }, actingUserId) {
   if (!donor_id || !amount || !date) {
     const err = new Error('donor_id, amount, and date are required');
     err.status = 400;
     throw err;
   }
+  if (expected_id && festival_id) {
+    const err = new Error('expected_id and festival_id cannot both be set');
+    err.status = 400;
+    throw err;
+  }
+  let resolvedFestivalId = null;
   if (expected_id) {
     const colonyId = await colonyIdForExpectedDonation(expected_id);
     if (colonyId !== null) {
@@ -34,12 +40,21 @@ export async function createDonation({ donor_id, expected_id, amount, date, coll
     }
   } else {
     await assertAdminOfAnyColony(actingUserId);
+    if (festival_id) {
+      const festivalColonyId = await colonyIdForFestival(festival_id);
+      if (festivalColonyId === null) {
+        const err = new Error('festival not found');
+        err.status = 404;
+        throw err;
+      }
+      resolvedFestivalId = festival_id;
+    }
   }
   try {
     const { rows } = await pool.query(
-      `INSERT INTO donations (donor_id, expected_id, amount, date, collected_by)
-       VALUES ($1, $2, $3, $4, $5) RETURNING donation_id`,
-      [donor_id, expected_id ?? null, amount, date, collected_by ?? null]
+      `INSERT INTO donations (donor_id, expected_id, festival_id, amount, date, collected_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING donation_id`,
+      [donor_id, expected_id ?? null, resolvedFestivalId, amount, date, collected_by ?? null]
     );
     return getDonation(rows[0].donation_id);
   } catch (err) {

@@ -28,12 +28,58 @@ below) — the only two resources left on the looser any-colony gate are
 walk-in donations and availability. Next: not yet decided — open
 candidate is DELETE for colonies/festivals/donors/expected_donations (still
 deferred, cascade behavior not decided). Ask user before picking.
-**`migrations/018_add_colony_id_to_donors.sql` has NOT been applied to the
-Render DB yet** — same caveat as every migration since 009: needs
-`npm run migrate` from an environment that can reach Render's internal
-Postgres host, or applying it via Render's own console.
+**Migrations 001-019 are applied to the Neon Postgres DB `.env` currently
+points at** (`DATABASE_URL` in this session's `.env` is Neon, not the
+Render-internal host earlier entries in this file were caveating about).
+Note for whoever runs migrations against a *different* target (e.g. the
+Render instance mentioned in older entries below): that target's
+`schema_migrations` table may not reflect which migrations actually ran if
+its schema was ever hand-applied or restored from a dump — verify actual
+columns/constraints match a migration's intent before assuming
+`npm run migrate` will apply cleanly, the way this session had to backfill
+Neon's empty `schema_migrations` table for 001-018 (schema already matched,
+tracking table just hadn't been populated) before 019 could run.
 
 ## Done
+- **Added optional `festival_id` to `donations` so a walk-in gift can count
+  toward a specific festival's balance** (see
+  `plans/donations-festival-id.md`): previously a walk-in donation
+  (`expected_id IS NULL`) had no schema path to any festival, so cash
+  collected at the counter with no pledge on file silently never showed up
+  in `festival.current_balance` — undercounting the real treasury.
+  **`migrations/019_add_festival_id_to_donations.sql`** adds a nullable
+  `donations.festival_id INTEGER REFERENCES festival(festival_id)` plus an
+  index, no backfill (existing walk-in rows stay `festival_id: null`, same
+  behavior as before this change).
+  **`services/donationService.js`**: `createDonation` now rejects (400
+  `"expected_id and festival_id cannot both be set"`) a request that sets
+  both — the two are mutually exclusive by design so a donation only ever
+  has one path into a festival's balance. When `expected_id` is set,
+  `festival_id` is not stored (stays `null`) — pledge-linked balance math
+  already works via the existing `expected_donations` join, so nothing
+  about that path changed. When it's a walk-in and `festival_id` is given,
+  it's validated against `festival` (reusing
+  `colonyMembershipService.colonyIdForFestival` — `null` back means it
+  doesn't exist) and rejected 404 `"festival not found"` if missing —
+  deliberately a 404 up front rather than this API's more common
+  caught-FK-violation-as-400 pattern, per explicit task instruction. No
+  colony-specific check was added for `festival_id` — walk-ins keep the
+  existing "admin of at least one colony" gate.
+  **`services/festivalService.js`**: `current_balance`'s `BASE_SELECT` gets
+  a second summand — donations where `festival_id` matches the row's own
+  `festival_id` directly and `expected_id IS NULL` (the `expected_id IS
+  NULL` guard is defense-in-depth against double-counting, on top of the
+  write-time 400 that should make it unreachable in practice).
+  GET /donations responses already include the new column for free
+  (`BASE_SELECT` there is `d.*`), no route changes needed.
+  **Tests**: new `test/donations.test.js` (4 cases) — walk-in with
+  `festival_id` counted in that festival's balance; walk-in with no
+  `festival_id` still excluded; both fields set together rejected 400;
+  nonexistent `festival_id` rejected 404. Full suite (24 tests) passes.
+  `docs/BACKEND_ANALYSIS.md` updated: header out-of-date note, §3 (donations
+  entity + derived `current_balance` formula), §4 (Donations create body +
+  new error rows in §7), §6 (donation workflow step 6, festival-balance
+  summary), §8 (Log a Walk-in Donation screen).
 - **Replaced `POST /auth/bootstrap` with normal self-service `POST /auth/register`**
   (see `plans/self-service-registration.md`): bootstrap's one-time,
   self-limiting "first account" concept is gone entirely — `authService

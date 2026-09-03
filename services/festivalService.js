@@ -10,6 +10,11 @@ const BASE_SELECT = `
       JOIN expected_donations ed ON ed.expected_id = d.expected_id
       WHERE ed.festival_id = f.festival_id AND d.deleted_at IS NULL
     ), 0)
+    +
+    COALESCE((
+      SELECT SUM(d2.amount) FROM donations d2
+      WHERE d2.festival_id = f.festival_id AND d2.expected_id IS NULL AND d2.deleted_at IS NULL
+    ), 0)
     -
     COALESCE((
       SELECT SUM(ep.amount) FROM expense_payments ep

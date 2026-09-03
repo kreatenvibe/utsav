@@ -8,6 +8,8 @@
 
 *Also out of date as of migration `018_add_colony_id_to_donors.sql`: any prior description of `donors` as a flat, unscoped directory gated by "admin of any colony." Donors now carry a required `colony_id` and are gated the same way as festivals/expenses/tasks — see §3/§4/§5 below.*
 
+*Also out of date as of migration `019_add_festival_id_to_donations.sql`: any prior description of walk-in donations (`expected_id IS NULL`) as always excluded from every festival's `current_balance`. A walk-in can now optionally set `festival_id` to opt into a specific festival's balance — see §3/§4/§6 below.*
+
 ---
 
 ## 1. Understand the Product
@@ -116,7 +118,7 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 - `total_donated` is **not a column** — computed on every read by summing linked, non-deleted `donations`.
 
 **donations** (actual payment against a pledge, or a walk-in gift)
-- `donation_id` (PK), `donor_id` (FK, required), `expected_id` (FK, **nullable** — null means a walk-in gift with no pledge), `amount` (required, frozen after insert), `date` (required, plain DATE), `collected_by` (FK → **users** as of migration 015, nullable, attribution only), `deleted_at` (soft-delete marker, migration 007).
+- `donation_id` (PK), `donor_id` (FK, required), `expected_id` (FK, **nullable** — null means a walk-in gift with no pledge), `festival_id` (FK → `festival`, **nullable, added migration 019, walk-in-only** — lets a walk-in gift optionally count toward a specific festival's `current_balance`; mutually exclusive with `expected_id`, a request setting both is rejected 400), `amount` (required, frozen after insert), `date` (required, plain DATE), `collected_by` (FK → **users** as of migration 015, nullable, attribution only), `deleted_at` (soft-delete marker, migration 007).
 - No PATCH endpoint exists at all — `amount` truly cannot be edited once created.
 - GET responses inline the collector as `collector: { user_id, name, phone } | null` alongside the raw `collected_by` id (`email` dropped in migration 016, see §4).
 
@@ -159,7 +161,7 @@ users ──optional FK──▶ donations.collected_by, expense_payments.paid_b
 ### Derived/calculated values (never stored)
 - `expected_donations.total_donated` = SUM(`donations.amount`) where `expected_id` matches and `deleted_at IS NULL`.
 - `expenses.total_paid` = SUM(`expense_payments.amount`) where `expense_id` matches, both expense and payment not soft-deleted.
-- `festival.current_balance` = SUM(donations linked via expected_donations to this festival) − SUM(expense_payments linked via expenses to this festival), both excluding soft-deleted rows. **Walk-in donations (`expected_id IS NULL`) are excluded** — there's no schema path from a walk-in donation to a festival.
+- `festival.current_balance` = SUM(donations linked via expected_donations to this festival) + SUM(walk-in donations with `donations.festival_id` set directly to this festival, `expected_id IS NULL`) − SUM(expense_payments linked via expenses to this festival), all excluding soft-deleted rows. **As of migration 019**, a walk-in donation can opt in to a festival's balance by setting `festival_id` on the donation itself — a walk-in with no `festival_id` (the default, and the only option before migration 019) is still excluded, same as before.
 
 ### Authorization scoping, resolved (previously "explicitly out of scope")
 This used to be a flagged, deferred inconsistency (donors/walk-in-donations/availability were writable by any authenticated user, with no colony check at all). It's resolved now: **every write in the app requires colony-admin.** Walk-in donations and availability still have no FK path to a specific colony, so their gate remains "admin of *at least one* colony" (`assertAdminOfAnyColony`). **Donors are the exception as of migration 018** — now that `donors.colony_id` exists, donor writes require admin of *that specific colony* (`assertColonyAdmin`), the same gate as every other colony-owned resource — see §5 for the full rule.
@@ -290,7 +292,7 @@ Create body: `{ donor_id, festival_id, expected_amount, year, purpose? }`, first
 | GET | `/donations/:id` | Detail | — |
 | DELETE | `/donations/:id` | Soft delete | 🔒, same gate as create |
 
-Create body: `{ donor_id, expected_id?, amount, date, collected_by? }`. No PATCH exists — `amount` is frozen. `collected_by` is now an optional `users.user_id` (was `members.member_id`). GET responses inline `collector: { user_id, name, phone } | null` alongside the raw `collected_by` (`email` dropped in migration 016).
+Create body: `{ donor_id, expected_id?, festival_id?, amount, date, collected_by? }`. No PATCH exists — `amount` is frozen. `collected_by` is now an optional `users.user_id` (was `members.member_id`). **`festival_id` (added migration 019)** is only meaningful on a walk-in donation (`expected_id` omitted) — it lets that walk-in count toward a specific festival's `current_balance`. Setting both `expected_id` and `festival_id` in the same request is rejected 400 `"expected_id and festival_id cannot both be set"`. A `festival_id` that doesn't resolve to a real festival is 404 `"festival not found"` (unlike most FK checks in this API, which are a caught-and-translated 400 — this one is validated up front instead, per explicit design choice). No colony-specific check is added for `festival_id` — the walk-in gate stays "admin of at least one colony," unchanged. GET responses inline `collector: { user_id, name, phone } | null` alongside the raw `collected_by`, and now also the raw `festival_id` (`email` dropped in migration 016).
 
 ### Expenses
 
@@ -422,14 +424,14 @@ On any 401 from a write call, discard token and re-prompt login
 3. As money comes in, organizer logs one or more **Donations** (`POST /donations`) against that `expected_id` — each is a frozen row, `amount` never edited again.
 4. `GET /expected-donations/:id` recomputes `total_donated` live by summing those donations.
 5. Organizer explicitly `PATCH`es the pledge's `status` to `'closed'` when done — this never happens automatically, even if `total_donated >= expected_amount`.
-6. A donation can alternatively skip step 2 entirely — a "walk-in" donation with `expected_id: null` — which is excluded from any festival's `current_balance` and from colony authorization scoping.
+6. A donation can alternatively skip step 2 entirely — a "walk-in" donation with `expected_id: null` — which stays excluded from colony authorization scoping (still just "admin of at least one colony"). **As of migration 019**, a walk-in can optionally set `festival_id` to count toward that specific festival's `current_balance`; a walk-in with no `festival_id` is still excluded from every festival's balance, as before.
 7. To correct a mistaken amount, the only path is `DELETE /donations/:id` (soft-delete) and re-`POST` a corrected one — there is no edit.
 
 ### Expense (planned → paid) workflow
 Mirrors donations exactly: `POST /expenses` (planned cost against a festival) → one or more `POST /expense-payments` against it → `expenses.total_paid` computed live → organizer `PATCH`es `status` to `'settled'` manually. Expense itself (unlike a pledge) *can* be edited via PATCH (`purpose`, `vendor_name`, `amount_planned`, `status`); only the payment rows are frozen.
 
 ### Festival balance
-`festival.current_balance` is computed on every `GET /festivals` or `GET /festivals/:id` — never stored, never updated by a write. It's `Σ(donations via expected_donations for this festival) − Σ(expense_payments via expenses for this festival)`, both sums excluding soft-deleted rows.
+`festival.current_balance` is computed on every `GET /festivals` or `GET /festivals/:id` — never stored, never updated by a write. It's `Σ(donations via expected_donations for this festival) + Σ(walk-in donations with festival_id set directly to this festival) − Σ(expense_payments via expenses for this festival)`, all sums excluding soft-deleted rows. The two donation sums can never overlap the same row — `expected_id` and `festival_id` are mutually exclusive on a single donation, enforced at write time (migration 019).
 
 ### Task/volunteer workflow
 1. Organizer creates a **Task** (`POST /tasks`) under a festival, optionally with a target `labor_required` headcount and a `planned_date`.
@@ -452,6 +454,8 @@ Error response format is uniform across the whole API: `{ "error": "<message>" }
 | Delete blocked by dependent rows | 400 | `"cannot delete task with existing task_assignments; remove those first"` | Caught Postgres `23503` on the DELETE itself |
 | Insufficient colony privilege | 403 | `"you must be an admin of this colony to do that"` / `"you must be an admin of at least one colony to do that"` | `colonyMembershipService.assertColonyAdmin`/`assertAdminOfAnyColony` (this change — `assertColonyMember` was removed, colony-admin is now the only write role) |
 | Pledge's donor and festival belong to different colonies | 400 | `"Donor belongs to a different colony"` | `expectedDonationService.createExpectedDonation` (migration 018) |
+| Donation sets both `expected_id` and `festival_id` | 400 | `"expected_id and festival_id cannot both be set"` | `donationService.createDonation` (migration 019) |
+| Walk-in donation's `festival_id` doesn't reference an existing festival | 404 | `"festival not found"` | `donationService.createDonation` (migration 019 — a deliberate exception to this table's usual FK-violation-as-400 convention, validated up front instead) |
 | Missing/invalid/expired JWT on a write | 401 | `"missing or malformed Authorization header"` / `"invalid or expired token"` | `middleware/auth.js` |
 | Wrong password or unknown phone at login | 401 | `"invalid credentials"` (identical message, intentionally) | `authService.loginUser` |
 | Login missing `phone` or `password` | 400 | `"phone and password are required"` | Manual check in `authService.loginUser` (migration 016 — replaces the old email/phone exactly-one-of checks, which no longer apply) |
@@ -523,10 +527,10 @@ Notes for a mobile client:
 
 ### Screen: Log a Walk-in Donation
 **Purpose:** Record a gift with no prior pledge.
-**Data required:** donor (existing or newly created, scoped to a `colony_id`), amount, date, optional collector.
-**APIs required:** `POST /donors` (if new, requires `colony_id`), `POST /donations` (no `expected_id`).
-**Actions:** Quick-add flow.
-**States:** Loading; Error; Success — note this donation won't appear in any festival's balance.
+**Data required:** donor (existing or newly created, scoped to a `colony_id`), amount, date, optional collector, optional festival (as of migration 019).
+**APIs required:** `POST /donors` (if new, requires `colony_id`), `POST /donations` (no `expected_id`, optional `festival_id`).
+**Actions:** Quick-add flow; optionally attach the gift to a specific festival via `festival_id` so it counts toward that festival's balance — leave it unset for a gift that isn't tied to any one festival's books.
+**States:** Loading; Error (404 if the chosen `festival_id` doesn't exist); Success — if no festival was picked, note this donation won't appear in any festival's balance.
 
 ### Screen: Budget Lines (Expenses) List + Detail
 **Purpose:** Mirror of Pledges for the spending side.
