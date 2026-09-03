@@ -21,9 +21,9 @@ function shape(row) {
   };
 }
 
-export async function createExpensePayment({ expense_id, amount, date, paid_by }, actingUserId) {
-  if (!expense_id || !amount || !date) {
-    const err = new Error('expense_id, amount, and date are required');
+export async function createExpensePayment({ expense_id, amount, date, note, paid_by }, actingUserId) {
+  if (!expense_id || !amount || !date || !note) {
+    const err = new Error('expense_id, amount, date, and note are required');
     err.status = 400;
     throw err;
   }
@@ -33,9 +33,9 @@ export async function createExpensePayment({ expense_id, amount, date, paid_by }
   }
   try {
     const { rows } = await pool.query(
-      `INSERT INTO expense_payments (expense_id, amount, date, paid_by)
-       VALUES ($1, $2, $3, $4) RETURNING payment_id`,
-      [expense_id, amount, date, paid_by ?? null]
+      `INSERT INTO expense_payments (expense_id, amount, date, note, paid_by)
+       VALUES ($1, $2, $3, $4, $5) RETURNING payment_id`,
+      [expense_id, amount, date, note, paid_by ?? null]
     );
     return getExpensePayment(rows[0].payment_id);
   } catch (err) {

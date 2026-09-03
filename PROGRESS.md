@@ -41,6 +41,32 @@ Neon's empty `schema_migrations` table for 001-018 (schema already matched,
 tracking table just hadn't been populated) before 019 could run.
 
 ## Done
+- **Added mandatory `note` to `expense_payments`** (see
+  `plans/expense-payments-note-field.md`): `expense_payments` had no
+  human-readable label for what a payment was actually for beyond the
+  parent expense's `purpose`/`vendor_name` — a per-payment `note` was added
+  as a required field. **`migrations/020_add_note_to_expense_payments.sql`**
+  adds `note TEXT`, backfills pre-existing rows with `''` (same
+  backfill-then-constrain pattern as `013_users_name.sql` and
+  `018_add_colony_id_to_donors.sql`), then sets `NOT NULL`. **Note**: this
+  Neon DB's `schema_migrations` table was found empty despite the schema
+  already reflecting all 19 prior migrations (provisioned from a schema
+  dump, not via `db/migrate.js`) — backfilled the 19 filenames into
+  `schema_migrations` (no SQL re-run) before applying 020, so the tracking
+  table now matches reality.
+  **`services/expensePaymentService.js`**: `createExpensePayment` adds
+  `note` to the required-field check (`expense_id, amount, date, and note
+  are required`, 400) and to the INSERT. `note` is frozen at creation like
+  `amount` — no PATCH exists or was added, matching CLAUDE.md's
+  never-edit-money-rows-after-creation rule. `BASE_SELECT` already used
+  `ep.*`, so `note` appears in GET list/detail responses for free.
+  **Tests**: updated `test/colonyMembership.test.js`'s
+  admin-gate-reaches-expense_payments case to pass `note` on both the
+  blocked and ok `POST /expense-payments` calls (the required-field check
+  runs before the colony-admin check, so a missing `note` would have turned
+  the expected-403 assertion into a 400). Full suite (24 tests) passes.
+  `docs/BACKEND_ANALYSIS.md` updated: §3 (`expense_payments` entity) and §4
+  (Expense Payments create body).
 - **Added optional `festival_id` to `donations` so a walk-in gift can count
   toward a specific festival's balance** (see
   `plans/donations-festival-id.md`): previously a walk-in donation

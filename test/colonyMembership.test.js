@@ -194,13 +194,13 @@ test('admin-only gate reaches expenses/expense_payments and tasks/task_assignmen
   const blockedExpensePayment = await request(app)
     .post('/expense-payments')
     .set('Authorization', `Bearer ${outsider.token}`)
-    .send({ expense_id: expense.body.expense_id, amount: 50, date: '2026-01-01' });
+    .send({ expense_id: expense.body.expense_id, amount: 50, date: '2026-01-01', note: 'Chairs rental' });
   assert.equal(blockedExpensePayment.status, 403);
 
   const okExpensePayment = await request(app)
     .post('/expense-payments')
     .set('Authorization', `Bearer ${admin.token}`)
-    .send({ expense_id: expense.body.expense_id, amount: 50, date: '2026-01-01' });
+    .send({ expense_id: expense.body.expense_id, amount: 50, date: '2026-01-01', note: 'Chairs rental' });
   assert.equal(okExpensePayment.status, 201);
   assert.equal(okExpensePayment.body.paid_by, null);
   assert.equal(okExpensePayment.body.payer, null);

@@ -127,7 +127,7 @@ Users  → colony_memberships → Colony  (login identity IS the volunteer/organ
 - `total_paid` computed by summing linked, non-deleted `expense_payments`.
 
 **expense_payments** (actual payment against an expense)
-- `payment_id` (PK), `expense_id` (FK, required), `amount` (required, frozen), `date` (required), `paid_by` (FK → **users** as of migration 015, nullable, attribution only), `deleted_at` (soft-delete).
+- `payment_id` (PK), `expense_id` (FK, required), `amount` (required, frozen), `date` (required), `note` (required, TEXT, frozen — added migration 020, backfilled `''` on pre-existing rows), `paid_by` (FK → **users** as of migration 015, nullable, attribution only), `deleted_at` (soft-delete).
 - No PATCH endpoint at all. GET responses inline the payer as `payer: { user_id, name, phone } | null` (`email` dropped in migration 016, see §4).
 
 **tasks**
@@ -315,7 +315,7 @@ Create body: `{ festival_id, purpose?, vendor_name?, amount_planned }`. `status`
 | GET | `/expense-payments/:id` | Detail | — |
 | DELETE | `/expense-payments/:id` | Soft delete | 🔒, colony admin |
 
-Create body: `{ expense_id, amount, date, paid_by? }`. No PATCH. `paid_by` is now an optional `users.user_id` (was `members.member_id`). GET responses inline `payer: { user_id, name, phone } | null` alongside the raw `paid_by` (`email` dropped in migration 016).
+Create body: `{ expense_id, amount, date, note, paid_by? }`. `note` is required (added migration 020) and, like `amount`, frozen once created — no PATCH exists for it. `paid_by` is now an optional `users.user_id` (was `members.member_id`). GET responses inline `payer: { user_id, name, phone } | null` alongside the raw `paid_by` (`email` dropped in migration 016).
 
 ### Tasks
 
