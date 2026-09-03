@@ -11,8 +11,8 @@ function uniquePhone() {
   return `9${Date.now().toString().slice(-9)}${Math.floor(Math.random() * 10)}`;
 }
 
-// No self-registration endpoint anymore — bootstrap test users with a
-// direct insert, same as a real deployment's first admin would need.
+// Unrelated to registration — provisions a user directly for tests that just
+// need someone already logged in, ready to create/join colonies.
 async function createLoginUser(label) {
   const phone = uniquePhone();
   const password = 'password123';

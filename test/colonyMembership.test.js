@@ -11,10 +11,9 @@ function uniquePhone() {
   return `9${Date.now().toString().slice(-9)}${Math.floor(Math.random() * 10)}`;
 }
 
-// There is no self-registration endpoint anymore (POST /auth/register was
-// removed — every account is created via a colony admin). Tests bootstrap
-// their first users the same way a real deployment's first admin would
-// have to be provisioned: a direct insert, bypassing the API.
+// Most tests still provision their users via a direct insert rather than
+// POST /auth/register (unrelated to registration — this just needs a user
+// that's already a member of nothing, ready to create/join colonies).
 async function createLoginUser(label) {
   const phone = uniquePhone();
   const password = 'password123';
@@ -307,30 +306,44 @@ test('POST /auth/login: unknown phone or wrong password is 401 with the same mes
   assert.equal(wrongPassword.body.error, 'invalid credentials');
 });
 
-test('POST /auth/register no longer exists', async () => {
-  const admin = await createLoginUser('register-check-admin');
-  const res = await request(app)
-    .post('/auth/register')
-    .set('Authorization', `Bearer ${admin.token}`)
-    .send({ name: 'x', phone: '9990000001', password: 'x' });
-  assert.equal(res.status, 404, 'authenticated so the app-wide write gate does not shadow the route-not-found check');
+test('POST /auth/register: 400 on missing fields', async () => {
+  const res = await request(app).post('/auth/register').send({ phone: '9990000002' });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, 'name, phone, and password are required');
 });
 
-test('POST /auth/bootstrap: 400 on missing fields, 403 once any user exists', async () => {
-  const missingFields = await request(app).post('/auth/bootstrap').send({ phone: '9990000002' });
-  assert.equal(missingFields.status, 400);
-
-  // The shared test DB always has at least one user by the time this test
-  // runs (every other test creates one), so bootstrap's "table is empty"
-  // path is exercised implicitly by every prior test passing, not directly
-  // here — asserting the empty-table success path would require truncating
-  // `users` in a DB other tests/developers may share, which this suite
-  // deliberately avoids (see createLoginUser's comment above).
+test('POST /auth/register: 201 with a working token, and repeat calls keep working', async () => {
+  const phone = uniquePhone();
   const res = await request(app)
-    .post('/auth/bootstrap')
-    .send({ name: 'Should Not Work', phone: '9990000003', password: 'password123' });
-  assert.equal(res.status, 403);
-  assert.equal(res.body.error, 'setup already completed');
+    .post('/auth/register')
+    .send({ name: 'Self Registered', phone, password: 'password123' });
+  assert.equal(res.status, 201);
+  assert.ok(res.body.token, 'response is { token }, same shape as /auth/login');
+
+  const loginRes = await request(app).post('/auth/login').send({ phone, password: 'password123' });
+  assert.equal(loginRes.status, 200, 'the registered account can log in normally on a later session');
+
+  const { rows } = await pool.query('SELECT user_id FROM users WHERE phone = $1', [phone]);
+  created.userIds.push(rows[0].user_id);
+
+  // No one-time restriction — unlike bootstrap, a second registration call
+  // (with a different phone) still succeeds.
+  const secondPhone = uniquePhone();
+  const secondRes = await request(app)
+    .post('/auth/register')
+    .send({ name: 'Second Self Registered', phone: secondPhone, password: 'password123' });
+  assert.equal(secondRes.status, 201);
+  const { rows: secondRows } = await pool.query('SELECT user_id FROM users WHERE phone = $1', [secondPhone]);
+  created.userIds.push(secondRows[0].user_id);
+});
+
+test('POST /auth/register: 409 on duplicate phone', async () => {
+  const admin = await createLoginUser('duplicate-phone-check');
+  const res = await request(app)
+    .post('/auth/register')
+    .send({ name: 'Someone Else', phone: admin.phone, password: 'password123' });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.error, 'phone already registered');
 });
 
 test('GET /users?search= matches partial name/phone and never returns email', async () => {

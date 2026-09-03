@@ -16,9 +16,10 @@ JWT auth guards all write endpoints, colony-admin is now the only write role
 app-wide (see below — this closes the walk-in-donations/availability/donors
 scoping gap that was previously deferred here), the `members` table is
 gone (retired in favor of `users` + `colony_memberships`), `email` is
-gone too — phone is now the sole login identifier and self-registration no
-longer exists, and the first-account-provisioning gap that opened is now
-closed by `POST /auth/bootstrap` (see below), `availability` now has a
+gone too — phone is now the sole login identifier, and self-registration is
+back via `POST /auth/register` (replacing the one-time `POST /auth/bootstrap`
+that briefly closed the first-account-provisioning gap — see below),
+`availability` now has a
 `UNIQUE (user_id, date)` constraint with idempotent upsert on
 `POST /availability` plus a new `POST /availability/bulk` for multi-date
 submission (see below), and `donors` now carry a required `colony_id` and
@@ -33,6 +34,65 @@ Render DB yet** — same caveat as every migration since 009: needs
 Postgres host, or applying it via Render's own console.
 
 ## Done
+- **Replaced `POST /auth/bootstrap` with normal self-service `POST /auth/register`**
+  (see `plans/self-service-registration.md`): bootstrap's one-time,
+  self-limiting "first account" concept is gone entirely — `authService
+  .bootstrapFirstUser` (the `LOCK TABLE users`-guarded empty-check + 403
+  "setup already completed" path) and its route are deleted, no code
+  anywhere still has a notion of a special "first" account.
+  **`POST /auth/register`** (public, no auth, mounted on `/auth` alongside
+  login/change-password, same as bootstrap was — ahead of the app-wide write
+  gate). Body `{ name, phone, password }`, all required (400 "name, phone,
+  and password are required" — reused bootstrap's exact message). Hashes
+  with the same `bcrypt.hash(password, SALT_ROUNDS)` call already used
+  elsewhere in `authService.js` (`changePassword`) and in
+  `colonyMembershipService.upsertMembership`'s create branch — no separate
+  helper existed to import, so this isn't a new hashing implementation, just
+  the same one-liner written at a third call site. `phone`'s existing unique
+  constraint is caught and translated to 409 `{"error": "phone already
+  registered"}` — deliberately not ambiguous like login's "invalid
+  credentials," since a registration form disclosing a taken phone is normal.
+  201 on success: `{ token }`, same shape/payload (`{ user_id, phone }`) as
+  `/auth/login` — logs the new account straight in, no separate login step.
+  **No one-time restriction** — the entire point of the change: this works
+  identically on every call, not just when `users` is empty. The created
+  account is a plain `users` row, no role flag, starts in zero colonies,
+  identical to one created by `POST /colonies/:id/members`.
+  **Abuse mitigation: explicitly flagged and asked about before
+  implementing** — user chose no rate limiting/captcha for now, matching
+  every other endpoint in this API (none of which rate-limits today);
+  revisit if abuse is actually observed.
+  **Verified unchanged, per the task's explicit request**: `POST /colonies`
+  (create-for-self) and `POST /colonies/:id/members` (admin create-or-link)
+  needed no code changes — register only adds a new way for a `users` row to
+  come into existence before either of those is called; the link branch of
+  create-or-link already covers "admin links a self-registered user" with no
+  new logic. No join-request/pending-membership table was added — joining an
+  existing colony stays an offline, admin-mediated arrangement by design.
+  Test suite: deleted the bootstrap-only-once test and the now-stale "POST
+  /auth/register no longer exists" test in `test/colonyMembership.test.js`;
+  added three new cases (400 missing field, 201 with `{ token }` shape plus
+  confirming a second registration call also succeeds, 409 duplicate phone).
+  All 20 tests pass (17 pre-existing + 3 new) — run directly against the
+  live Neon Postgres now configured in `.env` (this session's `DATABASE_URL`
+  points at Neon, not the Render/local-docker split described in earlier
+  entries below).
+  `docs/BACKEND_ANALYSIS.md` updated throughout — §3 (`users` entity's
+  "ways to get a row"), §4 (Auth endpoint table + body, replacing the
+  bootstrap bullet entirely), §5 (registration description, no-rate-limiting
+  note replacing the resolved-bootstrapping-gap note), §6 ("Colony +
+  membership bootstrap" workflow renamed "onboarding" and rewritten around
+  register), §7 (error table rows), §11/§12 (resolved-question updated to
+  reflect bootstrap being superseded, not just resolved) — plus the "Mobile
+  auth flow" diagram replaced with Register → (create colony) or (wait for
+  an admin to find you via `GET /users?search=` and link you) → Login on
+  later sessions.
+  **Not touched**: `Festival_Management_API.postman_collection.json`'s Auth
+  folder — flagged, not fixed. It already predates several migrations (still
+  has email-based Register/Login-by-email entries from before migration 016
+  dropped `email` entirely), so it was already out of sync going into this
+  session; reconciling it is a larger job than this task's explicit scope
+  ("whatever doc plays the role of BACKEND_ANALYSIS.md").
 - **Scoped `donors` to a specific colony** (see `plans/donors-colony-scoping.md`):
   closes the last piece of the "colony-admin is the only write role" story —
   `donors` was the one remaining resource gated by the looser "admin of any

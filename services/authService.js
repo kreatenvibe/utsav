@@ -41,43 +41,32 @@ export async function loginUser({ phone, password }) {
   return { token: signToken(user) };
 }
 
-// Creates the very first users row in a fresh deployment, now that
-// self-registration is gone and every other account is created by a colony
-// admin. Only succeeds while the users table is empty — the LOCK TABLE keeps
-// the count-then-insert atomic so two near-simultaneous calls can't both
-// pass the check and both insert.
-export async function bootstrapFirstUser({ name, phone, password }) {
+const PHONE_UNIQUE_VIOLATION = '23505';
+
+// Plain self-service registration — a users row identical to one created by
+// a colony admin (no role flag, zero colonies). Works on every call,
+// repeatedly; there is no "first account" concept in this API.
+export async function registerUser({ name, phone, password }) {
   if (!name || !phone || !password) {
     const err = new Error('name, phone, and password are required');
     err.status = 400;
     throw err;
   }
 
-  const client = await pool.connect();
+  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
   try {
-    await client.query('BEGIN');
-    await client.query('LOCK TABLE users IN EXCLUSIVE MODE');
-
-    const { rows: countRows } = await client.query('SELECT COUNT(*) FROM users');
-    if (Number(countRows[0].count) > 0) {
-      const err = new Error('setup already completed');
-      err.status = 403;
-      throw err;
-    }
-
-    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-    const { rows } = await client.query(
+    const { rows } = await pool.query(
       'INSERT INTO users (name, phone, password_hash) VALUES ($1, $2, $3) RETURNING user_id, phone',
       [name, phone, passwordHash]
     );
-
-    await client.query('COMMIT');
     return { token: signToken(rows[0]) };
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (err.code === PHONE_UNIQUE_VIOLATION) {
+      const e = new Error('phone already registered');
+      e.status = 409;
+      throw e;
+    }
     throw err;
-  } finally {
-    client.release();
   }
 }
 

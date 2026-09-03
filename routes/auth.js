@@ -12,9 +12,9 @@ router.post('/login', async (req, res, next) => {
   }
 });
 
-router.post('/bootstrap', async (req, res, next) => {
+router.post('/register', async (req, res, next) => {
   try {
-    res.status(201).json(await authService.bootstrapFirstUser(req.body));
+    res.status(201).json(await authService.registerUser(req.body));
   } catch (err) {
     next(err);
   }
